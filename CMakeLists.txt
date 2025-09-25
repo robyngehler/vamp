@@ -50,6 +50,18 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 include(CompilerSettings)
 include(FetchInitCPM)
+# Prefer a vendored Eigen install one directory above the source tree when available.
+set(_vamp_eigen_search
+    "${CMAKE_CURRENT_SOURCE_DIR}/../eigen-install"
+    "$ENV{EIGEN_PREFIX}"
+)
+foreach(_vamp_eigen_prefix IN LISTS _vamp_eigen_search)
+  if(_vamp_eigen_prefix AND EXISTS "${_vamp_eigen_prefix}/share/eigen3/cmake/Eigen3Config.cmake")
+    list(APPEND CMAKE_PREFIX_PATH "${_vamp_eigen_prefix}")
+  endif()
+endforeach()
+unset(_vamp_eigen_prefix)
+unset(_vamp_eigen_search)
 include(Dependencies)
 
 # Create VAMP C++ library
@@ -76,11 +88,14 @@ if(TARGET simdxorshift)
   target_link_libraries(vamp_cpp INTERFACE simdxorshift)
 endif()
 
-# Set library properties
-set_target_properties(vamp_cpp PROPERTIES
-    VERSION ${PROJECT_VERSION}
-    SOVERSION ${PROJECT_VERSION_MAJOR}
-)
+# INTERFACE libraries can't have VERSION/SOVERSION; guard in case target type changes
+get_target_property(vamp_cpp_type vamp_cpp TYPE)
+if(NOT vamp_cpp_type STREQUAL "INTERFACE_LIBRARY")
+  set_target_properties(vamp_cpp PROPERTIES
+      VERSION ${PROJECT_VERSION}
+      SOVERSION ${PROJECT_VERSION_MAJOR}
+  )
+endif()
 
 # Create alias target for modern CMake usage
 add_library(vamp::vamp ALIAS vamp_cpp)
@@ -145,6 +160,13 @@ if(VAMP_BUILD_CPP_DEMO)
   # Disable strict warnings for demos to maintain compatibility
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(vamp_rrtc_example PRIVATE -Wno-c++11-narrowing -Wno-sign-compare)
+  endif()
+
+  add_executable(vamp_multi_robot_example scripts/cpp/multi_robot_example.cc)
+  target_link_libraries(vamp_multi_robot_example PRIVATE vamp_cpp)
+
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(vamp_multi_robot_example PRIVATE -Wno-c++11-narrowing -Wno-sign-compare)
   endif()
 endif()
 

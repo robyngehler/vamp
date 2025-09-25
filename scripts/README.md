@@ -85,6 +85,9 @@ Visualization is enabled by `--visualize`, which shows the plan with the PyBulle
 
 # Other Scripts
 
+## `multi_robot_pybullet_compare.py`
+Compares the new `vamp.fkcc_multi_all` binding against PyBullet's contact queries for two Panda arms with configurable base transforms.
+
 ## `visualize_ompl.py`
 If you have the [OMPL](https://ompl.kavrakilab.org/) Python Bindings installed (we recommend using the [pre-built wheels](https://github.com/ompl/ompl/releases/tag/prerelease)) you can also test problems against OMPL using PyBullet's collision checking with this script.
 

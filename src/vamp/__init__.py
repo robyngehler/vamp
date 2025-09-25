@@ -18,6 +18,8 @@ __all__ = [
     "SimplifySettings",
     "SimplifyRoutine",
     "filter_pointcloud",
+    "fkcc_multi_all",
+    "fkcc_multi_self",
     ]
 
 from pathlib import Path
@@ -43,6 +45,8 @@ from ._core import AORRTCSettings as AORRTCSettings
 from ._core import SimplifyRoutine as SimplifyRoutine
 from ._core import SimplifySettings as SimplifySettings
 from ._core import filter_pointcloud as filter_pointcloud
+from ._core import fkcc_multi_all as fkcc_multi_all
+from ._core import fkcc_multi_self as fkcc_multi_self
 
 robots = _core.robots()
 

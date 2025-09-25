@@ -1,12 +1,17 @@
 # Using VAMP inside of C++ projects
 
-## C++ Demo
+## C++ Demos
 
-The VAMP C++ demo can be compiled with (in the VAMP directory):
+The C++ demos can be compiled with (in the VAMP directory):
 ```bash
 cmake -Bbuild -GNinja -DVAMP_BUILD_CPP_DEMO=On .
 cmake --build build
 ```
+
+This enables two example executables:
+
+- `vamp_rrtc_example`: runs the Panda sphere cage benchmark end-to-end.
+- `vamp_multi_robot_example`: demonstrates the `vamp::collision::fkcc_multi_*` helpers with two Panda arms positioned at different base frames.
 
 ## OMPL Integration Demo
 

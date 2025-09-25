@@ -10,6 +10,7 @@ NB_MODULE(_core_ext, pymodule)
 {
     vb::init_settings(pymodule);
     vb::init_environment(pymodule);
+    vb::init_multi_robot(pymodule);
 
     @VAMP_ROBOT_INITS@
 

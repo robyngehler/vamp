@@ -26,7 +26,7 @@ def main(
     if robot not in vamp.robots:
         raise RuntimeError(f"Robot {robot} does not exist in VAMP!")
 
-    robot_dir = Path(__file__).parent.parent / 'resources' / robot
+    robot_dir = Path(__file__).resolve().parent.parent / 'resources' / robot
 
     print(str(robot_dir / f"{robot}_spherized.urdf"))
 
@@ -43,9 +43,11 @@ def main(
     sim = vpb.PyBulletSimulator(str(robot_dir / f"{robot}_spherized.urdf"), vamp_module.joint_names(), True)
 
     start = sample_valid(vamp_module, sampler)
+    print("Start:", start)
 
     while True:
         goal = sample_valid(vamp_module, sampler)
+        print("Goal: ", goal)
         result = planner_func(start, goal, env, plan_settings, sampler)
         solved = result.solved
         print(solved)

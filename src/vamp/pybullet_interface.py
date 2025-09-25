@@ -52,10 +52,12 @@ class PyBulletSimulator:
         self.objects = []
 
         if urdf:
-            self.urdf = urdf
+            urdf_path = Path(urdf).resolve()
+            self.urdf = str(urdf_path)
+            self.client.setAdditionalSearchPath(str(urdf_path.parent))
             with DisableRendering(self.client), RedirectStream(sys.stdout), RedirectStream(sys.stderr):
                 self.skel_id = self.client.loadURDF(
-                    urdf,
+                    str(urdf_path),
                     basePosition = (0, 0, 0),
                     baseOrientation = (0, 0, 0, 1),
                     useFixedBase = True,

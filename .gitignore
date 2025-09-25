@@ -1,4 +1,8 @@
 build/
+build-py38/
+build-release/
+build-cppexp/
+third_party/
 .cache/
 compile_commands.json
 *.out.*
@@ -19,3 +23,4 @@ venv/
 /resources/panda/*.pkl
 src/vamp/_core/*.pyi
 /.mypy_cache/
+.vscode/

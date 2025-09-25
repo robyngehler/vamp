@@ -210,6 +210,15 @@ Each robot in VAMP is provided as a Python submodule (e.g., `vamp.panda`, `vamp.
 - `eefk`: compute the end-effector transform for a given configuration. Used by attachments.
 - `filter_self_from_pointcloud`: removes points in the pointcloud that are currently in collision with the robot (i.e., points which probably belong to the robot, if the robot is in a known valid configuration).
 
+### Multi-Robot Collision Support
+
+The header `vamp/collision/multi_robot.hh` provides `fkcc_multi_*` helpers for checking multiple traced robots at once. Build a state with `vamp::collision::make_multi_robot_state<Robot, rake>(configuration, base_transform, optional_attachment)` for each robot and call one of:
+
+- `fkcc_multi_all` / `fkcc_multi_all_attach` – check robots (and optional attachments) against each other **and** a shared environment.
+- `fkcc_multi_self` / `fkcc_multi_self_attach` – check only the inter-robot contacts (environment obstacles ignored).
+
+Each helper internally runs the robot's traced `fkcc` / `fkcc_attach`, applies the requested global transforms, and then performs pairwise sphere tests between robots and attachments. Python bindings are available via `vamp.fkcc_multi_all(states, environment)` and `vamp.fkcc_multi_self(states)`, where each state dictionary supplies a `robot` name, raw joint `configuration`, and an optional `transform`/`attachment`. See `scripts/cpp/multi_robot_example.cc` and `scripts/multi_robot_pybullet_compare.py` for executable examples.
+
 For the flying sphere in $\mathbb{R}^3$, additional operations are available to set the domain of the sphere and the radius:
 - `vamp.sphere.set_lows()` and `vamp.sphere.set_highs()` to set bounding box of space
 - `vamp.sphere.set_radius()` to set the sphere's radius

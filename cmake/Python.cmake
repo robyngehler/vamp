@@ -3,9 +3,13 @@
 
 if(VAMP_BUILD_PYTHON_BINDINGS)
   # Find Python and nanobind dependencies
-  find_package(Python 3.8
-    REQUIRED COMPONENTS Interpreter Development.Module
-    OPTIONAL_COMPONENTS Development.SABIModule)
+  if(CMAKE_VERSION VERSION_LESS 3.18)
+    find_package(Python 3.8 REQUIRED COMPONENTS Interpreter Development)
+  else()
+    find_package(Python 3.8
+      REQUIRED COMPONENTS Interpreter Development.Module
+      OPTIONAL_COMPONENTS Development.SABIModule)
+  endif()
 
   CPMAddPackage("gh:wjakob/nanobind#9a25aed8a7edfe60ef9ad1c911e57667bc4916c4")
 
@@ -55,6 +59,7 @@ if(VAMP_BUILD_PYTHON_BINDINGS)
   list(APPEND VAMP_EXT_SOURCES
     src/impl/vamp/bindings/environment.cc
     src/impl/vamp/bindings/settings.cc
+    src/impl/vamp/bindings/multi_robot.cc
     ${CMAKE_CURRENT_BINARY_DIR}/python.cc
   )
   foreach(robot_name robot_struct IN ZIP_LISTS VAMP_ROBOT_MODULES VAMP_ROBOT_STRUCTS)
