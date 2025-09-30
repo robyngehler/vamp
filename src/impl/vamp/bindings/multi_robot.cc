@@ -15,6 +15,7 @@
 #include <vamp/bindings/multi_robot_runtime.hh>
 #include <vamp/collision/environment.hh>
 #include <vamp/collision/sphere_sphere.hh>
+#include <vamp/collision/multi_robot.hh>
 
 namespace nb = nanobind;
 namespace vc = vamp::collision;
@@ -169,6 +170,176 @@ namespace
         return states;
     }
 
+    inline auto lookup_entries(const std::vector<RawState> &states) -> std::vector<const vr::RegistryEntry *>
+    {
+        std::vector<const vr::RegistryEntry *> entries;
+        entries.reserve(states.size());
+
+        for (const auto &raw : states)
+        {
+            const auto *entry = vr::lookup(raw.robot);
+            if (entry == nullptr)
+            {
+                const auto message = std::string("Unknown robot '") + raw.robot + "'.";
+                throw nb::value_error(message.c_str());
+            }
+
+            if (raw.configuration.size() != entry->dimension)
+            {
+                std::ostringstream oss;
+                oss << "Configuration for robot '" << raw.robot << "' must contain " << entry->dimension
+                    << " values (received " << raw.configuration.size() << ").";
+                throw nb::value_error(oss.str().c_str());
+            }
+
+            entries.push_back(entry);
+        }
+
+        return entries;
+    }
+
+    inline auto lookup_index(const nb::dict &mapping, const char *primary, const char *fallback) -> std::size_t
+    {
+        if (mapping.contains(primary))
+        {
+            return nb::cast<std::size_t>(mapping[primary]);
+        }
+
+        if (fallback != nullptr && mapping.contains(fallback))
+        {
+            return nb::cast<std::size_t>(mapping[fallback]);
+        }
+
+        std::ostringstream oss;
+        oss << "Allowed collision entry is missing index key '" << primary << "'.";
+        throw nb::value_error(oss.str().c_str());
+    }
+
+    inline auto parse_string_list(const nb::dict &mapping, const char *single_key, const char *plural_key)
+        -> std::vector<std::string>
+    {
+        std::vector<std::string> values;
+
+        if (mapping.contains(single_key))
+        {
+            values.emplace_back(nb::cast<std::string>(mapping[single_key]));
+            return values;
+        }
+
+        if (plural_key != nullptr && mapping.contains(plural_key))
+        {
+            nb::sequence seq = nb::cast<nb::sequence>(mapping[plural_key]);
+            const std::size_t count = nb::len(seq);
+            values.reserve(count);
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                values.emplace_back(nb::cast<std::string>(seq[i]));
+            }
+            return values;
+        }
+
+        return values;
+    }
+
+    inline auto parse_allowed_collisions(
+        nb::handle allowed_obj,
+        const std::vector<const vr::RegistryEntry *> &entries,
+        vc::MultiRobotCollisionFilter &filter) -> void
+    {
+        if (not allowed_obj or allowed_obj.is_none())
+        {
+            return;
+        }
+
+        nb::sequence seq = nb::cast<nb::sequence>(allowed_obj);
+        std::vector<std::size_t> spheres;
+
+        const std::size_t count = nb::len(seq);
+        for (std::size_t idx = 0; idx < count; ++idx)
+        {
+            nb::handle item = seq[idx];
+            if (not nb::isinstance<nb::dict>(item))
+            {
+                throw nb::type_error("Each allowed collision must be a mapping.");
+            }
+
+            nb::dict mapping = nb::cast<nb::dict>(item);
+
+            std::size_t state_index = lookup_index(mapping, "state", "state_index");
+
+            if (state_index >= entries.size())
+            {
+                throw nb::value_error("Allowed collision references an out-of-range state index.");
+            }
+
+            bool disable = true;
+            if (mapping.contains("enabled"))
+            {
+                disable = not nb::cast<bool>(mapping["enabled"]);
+            }
+            else if (mapping.contains("collide"))
+            {
+                disable = not nb::cast<bool>(mapping["collide"]);
+            }
+
+            if (not disable)
+            {
+                continue;
+            }
+
+            const auto *entry = entries[state_index];
+            auto &robot_filter = filter.ensure_robot(state_index, entry->sphere_count);
+
+            const auto objects = parse_string_list(mapping, "object", "objects");
+            if (objects.empty())
+            {
+                throw nb::value_error("Allowed collision entry must specify at least one object name.");
+            }
+
+            const bool attachment = mapping.contains("attachment") && nb::cast<bool>(mapping["attachment"]);
+
+            if (attachment)
+            {
+                for (const auto &object : objects)
+                {
+                    robot_filter.allow_attachment(object);
+                }
+
+                continue;
+            }
+
+            if (entry->link_lookup == nullptr)
+            {
+                throw nb::value_error("Robot does not expose link mapping for collision filtering.");
+            }
+
+            const auto links = parse_string_list(mapping, "link", "links");
+            if (links.empty())
+            {
+                throw nb::value_error("Allowed collision entry must specify at least one link name.");
+            }
+
+            for (const auto &link_name : links)
+            {
+                spheres.clear();
+                if (not entry->link_lookup(link_name, spheres) || spheres.empty())
+                {
+                    std::ostringstream oss;
+                    oss << "Unknown link '" << link_name << "' for robot state " << state_index << ".";
+                    throw nb::value_error(oss.str().c_str());
+                }
+
+                for (const auto sphere_index : spheres)
+                {
+                    for (const auto &object : objects)
+                    {
+                        robot_filter.allow_sphere(sphere_index, object);
+                    }
+                }
+            }
+        }
+    }
+
     inline auto spheres_collide(
         const std::vector<vc::Sphere<float>> &a,
         const std::vector<vc::Sphere<float>> &b) -> bool
@@ -269,7 +440,9 @@ namespace
     template <typename Callback>
     inline auto prepare_states(
         const std::vector<RawState> &raw_states,
+        const std::vector<const vr::RegistryEntry *> &entries,
         const vc::Environment<float> *environment,
+        const vc::MultiRobotCollisionFilter *filter,
         Callback &&on_invalid) -> bool
     {
         std::vector<vr::PreparedState> prepared(raw_states.size());
@@ -277,26 +450,22 @@ namespace
         for (std::size_t i = 0; i < raw_states.size(); ++i)
         {
             const auto &raw = raw_states[i];
-            const auto *entry = vr::lookup(raw.robot);
-            if (entry == nullptr)
-            {
-                const auto message = std::string("Unknown robot '") + raw.robot + "'.";
-                throw nb::value_error(message.c_str());
-            }
+            const auto *entry = entries[i];
 
-            if (raw.configuration.size() != entry->dimension)
-            {
-                std::ostringstream oss;
-                oss << "Configuration for robot '" << raw.robot << "' must contain " << entry->dimension
-                    << " values (received " << raw.configuration.size() << ").";
-                const auto message = oss.str();
-                throw nb::value_error(message.c_str());
-            }
+            const auto *robot_filter = (environment != nullptr && filter != nullptr) ? filter->robot(i) : nullptr;
 
-            if (not entry->fn(raw.configuration, raw.transform, raw.attachment, environment, prepared[i]))
+            if (not entry->fn(
+                    raw.configuration,
+                    raw.transform,
+                    raw.attachment,
+                    environment,
+                    robot_filter,
+                    prepared[i]))
             {
                 return on_invalid();
             }
+
+            prepared[i].registry = entry;
         }
 
         return collision_free(prepared);
@@ -309,7 +478,9 @@ void vamp::binding::init_multi_robot(nanobind::module_ &pymodule)
 
     pymodule.def(
         "fkcc_multi_all",
-        [](const nb::sequence &states_seq, const vc::Environment<float> &environment)
+        [](const nb::sequence &states_seq,
+           const vc::Environment<float> &environment,
+           nb::handle allowed_collisions)
         {
             auto states = parse_states(states_seq);
             if (states.empty())
@@ -317,18 +488,31 @@ void vamp::binding::init_multi_robot(nanobind::module_ &pymodule)
                 throw nb::value_error("fkcc_multi_all requires at least one robot state.");
             }
 
+            auto entries = lookup_entries(states);
+            vc::MultiRobotCollisionFilter filter;
+            const vc::MultiRobotCollisionFilter *filter_ptr = nullptr;
+
+            if (allowed_collisions && not allowed_collisions.is_none())
+            {
+                parse_allowed_collisions(allowed_collisions, entries, filter);
+                filter_ptr = &filter;
+            }
+
             return prepare_states(
                 states,
+                entries,
                 &environment,
+                filter_ptr,
                 []() { return false; });
         },
         "states"_a,
         "environment"_a,
+        nb::arg("allowed_collisions") = nb::none(),
         "Checks whether multiple robots are collision-free against each other and the shared environment.");
 
     pymodule.def(
         "fkcc_multi_self",
-        [](const nb::sequence &states_seq)
+        [](const nb::sequence &states_seq, nb::handle allowed_collisions)
         {
             auto states = parse_states(states_seq);
             if (states.empty())
@@ -336,11 +520,24 @@ void vamp::binding::init_multi_robot(nanobind::module_ &pymodule)
                 throw nb::value_error("fkcc_multi_self requires at least one robot state.");
             }
 
+            auto entries = lookup_entries(states);
+            vc::MultiRobotCollisionFilter filter;
+            const vc::MultiRobotCollisionFilter *filter_ptr = nullptr;
+
+            if (allowed_collisions && not allowed_collisions.is_none())
+            {
+                parse_allowed_collisions(allowed_collisions, entries, filter);
+                filter_ptr = &filter;
+            }
+
             return prepare_states(
                 states,
+                entries,
                 nullptr,
+                filter_ptr,
                 []() { return false; });
         },
         "states"_a,
+        nb::arg("allowed_collisions") = nb::none(),
         "Checks whether multiple robots are collision-free against each other, ignoring the environment.");
 }

@@ -2,6 +2,7 @@ build/
 build-py38/
 build-release/
 build-cppexp/
+build-install/
 third_party/
 .cache/
 compile_commands.json

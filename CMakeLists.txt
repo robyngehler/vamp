@@ -76,6 +76,18 @@ target_include_directories(vamp_cpp
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/vamp>
 )
 
+if(VAMP_WARNING_OPTIONS)
+  target_compile_options(vamp_cpp INTERFACE ${VAMP_WARNING_OPTIONS})
+endif()
+
+if(VAMP_ARCH_OPTIONS)
+  target_compile_options(vamp_cpp INTERFACE ${VAMP_ARCH_OPTIONS})
+endif()
+
+if(VAMP_FAST_ARGS_OPTIONS)
+  target_compile_options(vamp_cpp INTERFACE $<$<CONFIG:Release>:${VAMP_FAST_ARGS_OPTIONS}>)
+endif()
+
 target_link_libraries_system(vamp_cpp
     INTERFACE
     Eigen3::Eigen

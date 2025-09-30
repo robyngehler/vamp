@@ -232,7 +232,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if slider.spherized_joint_index is not None:
                 client.resetJointState(spherized.body_id, slider.spherized_joint_index, float(slider_value))
 
+        ts = time.time()
         is_valid = bool(robot_module.validate(full_config, environment, args.check_bounds))
+        te = time.time()
+        print(f"Validation took {(te - ts) * 1000.0:.2f} ms")
         if not is_valid:
             env_hits, self_hits = robot_module.debug(full_config, environment)
             offending_links = [

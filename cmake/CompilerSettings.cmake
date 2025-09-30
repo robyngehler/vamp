@@ -57,3 +57,14 @@ if(VAMP_LTO)
 	endif()
 endif()
 
+# Expose compile option lists for downstream consumers via INTERFACE properties.
+set(VAMP_WARNING_OPTIONS "-Wall;-Wextra;-Wno-ignored-attributes")
+set(VAMP_ARCH_OPTIONS "")
+if(VAMP_ARCH)
+  separate_arguments(VAMP_ARCH_OPTIONS UNIX_COMMAND "${VAMP_ARCH}")
+endif()
+
+set(VAMP_FAST_ARGS_OPTIONS "")
+if(VAMP_FAST_ARGS)
+  separate_arguments(VAMP_FAST_ARGS_OPTIONS UNIX_COMMAND "${VAMP_FAST_ARGS}")
+endif()

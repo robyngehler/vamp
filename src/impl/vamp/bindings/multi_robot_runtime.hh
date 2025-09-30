@@ -10,16 +10,21 @@
 
 #include <vamp/vector.hh>
 #include <vamp/collision/environment.hh>
+#include <vamp/collision/multi_robot.hh>
 #include <vamp/collision/sphere_sphere.hh>
+#include <vamp/robots/link_mapping.hh>
 
 namespace vamp::binding::multi_robot
 {
     namespace vc = vamp::collision;
 
+    struct RegistryEntry;
+
     struct PreparedState
     {
         std::vector<vc::Sphere<float>> spheres;
         std::vector<vc::Sphere<float>> attachments;
+        const RegistryEntry *registry = nullptr;
     };
 
     using PrepareFn = bool (*)(
@@ -27,13 +32,18 @@ namespace vamp::binding::multi_robot
         const Eigen::Isometry3f &base_transform,
         const vc::Attachment<float> *attachment,
         const vc::Environment<float> *environment,
+        const vc::MultiRobotCollisionFilter::RobotFilter *filter,
         PreparedState &out_state);
+
+    using LinkLookupFn = bool (*)(std::string_view link_name, std::vector<std::size_t> &out_spheres);
 
     struct RegistryEntry
     {
         std::string name;
         PrepareFn fn;
         std::size_t dimension;
+        std::size_t sphere_count;
+        LinkLookupFn link_lookup;
     };
 
     inline auto registry() -> std::vector<RegistryEntry> &
@@ -42,7 +52,12 @@ namespace vamp::binding::multi_robot
         return entries;
     }
 
-    inline auto register_preparer(std::string name, std::size_t dimension, PrepareFn fn) -> void
+    inline auto register_preparer(
+        std::string name,
+        std::size_t dimension,
+        std::size_t sphere_count,
+        PrepareFn fn,
+        LinkLookupFn link_lookup) -> void
     {
         auto &entries = registry();
         for (auto &entry : entries)
@@ -51,11 +66,13 @@ namespace vamp::binding::multi_robot
             {
                 entry.fn = fn;
                 entry.dimension = dimension;
+                entry.sphere_count = sphere_count;
+                entry.link_lookup = link_lookup;
                 return;
             }
         }
 
-        entries.push_back(RegistryEntry{std::move(name), fn, dimension});
+        entries.push_back(RegistryEntry{std::move(name), fn, dimension, sphere_count, link_lookup});
     }
 
     inline auto lookup(std::string_view name) -> const RegistryEntry *
@@ -79,6 +96,7 @@ namespace vamp::binding::multi_robot
         const Eigen::Isometry3f &base_transform,
         const vc::Attachment<float> *attachment,
         const vc::Environment<float> *environment,
+        const vc::MultiRobotCollisionFilter::RobotFilter *filter,
         PreparedState &out_state) -> bool
     {
         using Block = typename Robot::template ConfigurationBlock<vector_width>;
@@ -105,13 +123,22 @@ namespace vamp::binding::multi_robot
             robot_environment.attachments.reset();
         }
 
-        const bool valid = (attachment != nullptr) ?
-                               Robot::template fkcc_attach<vector_width>(robot_environment, block) :
-                               Robot::template fkcc<vector_width>(robot_environment, block);
+        bool valid = (attachment != nullptr) ?
+                         Robot::template fkcc_attach<vector_width>(robot_environment, block) :
+                         Robot::template fkcc<vector_width>(robot_environment, block);
 
         if (not valid)
         {
-            return false;
+            if (filter == nullptr || not vc::detail::collisions_allowed<Robot, vector_width>(
+                                             *filter,
+                                             robot_environment,
+                                             block,
+                                             attachment != nullptr))
+            {
+                return false;
+            }
+
+            valid = true;
         }
 
         typename Robot::template Spheres<vector_width> spheres;
@@ -149,6 +176,17 @@ namespace vamp::binding::multi_robot
     template <typename Robot>
     inline auto register_robot() -> void
     {
-        register_preparer(Robot::name, Robot::dimension, &prepare_state<Robot>);
+        auto lookup = [](std::string_view link, std::vector<std::size_t> &out) -> bool
+        {
+            return robots::collect_link_spheres<Robot>(link, out);
+        };
+
+        LinkLookupFn link_lookup = nullptr;
+        if constexpr (robots::LinkMapping<Robot>::available)
+        {
+            link_lookup = +lookup;
+        }
+
+        register_preparer(Robot::name, Robot::dimension, Robot::n_spheres, &prepare_state<Robot>, link_lookup);
     }
 }  // namespace vamp::binding::multi_robot

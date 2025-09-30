@@ -36,7 +36,7 @@ configure_cpp_build() {
   "$CMAKE_BIN" -S "$ROOT_DIR" -B "$ROOT_DIR/$BUILD_CPP_DIR" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_PREFIX_PATH="$EIGEN_PREFIX" \
-    -DVAMP_INSTALL_CPP_LIBRARY=OFF \
+    -DVAMP_INSTALL_CPP_LIBRARY=ON \
     -DVAMP_BUILD_PYTHON_BINDINGS=OFF \
     -DVAMP_BUILD_CPP_DEMO=ON \
     -DVAMP_BUILD_OMPL_DEMO=OFF
@@ -44,6 +44,10 @@ configure_cpp_build() {
 
 build_cpp_targets() {
   "$CMAKE_BIN" --build "$ROOT_DIR/$BUILD_CPP_DIR"
+}
+
+install_cpp_targets() {
+  "$CMAKE_BIN" --install "$ROOT_DIR/$BUILD_CPP_DIR"
 }
 
 clean_builds() {
@@ -59,6 +63,7 @@ case "$target" in
   cpp)
     configure_cpp_build
     build_cpp_targets
+    install_cpp_targets
     ;;
   all)
     build_python_targets

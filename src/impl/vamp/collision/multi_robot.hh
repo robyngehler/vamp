@@ -1,8 +1,13 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
+#include <cstdint>
+#include <string>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -10,10 +15,134 @@
 
 #include <vamp/vector.hh>
 #include <vamp/collision/environment.hh>
+#include <vamp/collision/validity.hh>
 #include <vamp/collision/sphere_sphere.hh>
 
 namespace vamp::collision
 {
+    struct MultiRobotCollisionFilter
+    {
+        struct RobotFilter
+        {
+            std::vector<std::unordered_set<std::string>> per_sphere_objects;
+            std::unordered_set<std::string> attachment_objects;
+
+            inline auto ensure_sphere_capacity(std::size_t count) -> void
+            {
+                if (per_sphere_objects.size() < count)
+                {
+                    per_sphere_objects.resize(count);
+                }
+            }
+
+            inline auto active() const noexcept -> bool
+            {
+                if (not attachment_objects.empty())
+                {
+                    return true;
+                }
+
+                for (const auto &entries : per_sphere_objects)
+                {
+                    if (not entries.empty())
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            inline auto allow_sphere(std::size_t sphere_index, std::string_view object) -> void
+            {
+                ensure_sphere_capacity(sphere_index + 1);
+                per_sphere_objects[sphere_index].emplace(object);
+            }
+
+            inline auto allow_attachment(std::string_view object) -> void
+            {
+                attachment_objects.emplace(object);
+            }
+
+            inline auto allows_sphere(std::size_t sphere_index, std::string_view object) const -> bool
+            {
+                if (sphere_index >= per_sphere_objects.size())
+                {
+                    return false;
+                }
+
+                const auto &entries = per_sphere_objects[sphere_index];
+                if (entries.empty())
+                {
+                    return false;
+                }
+
+                if (entries.find(std::string(object)) != entries.end())
+                {
+                    return true;
+                }
+
+                return entries.find(std::string("*")) != entries.end();
+            }
+
+            inline auto allows_attachment(std::string_view object) const -> bool
+            {
+                if (attachment_objects.empty())
+                {
+                    return false;
+                }
+
+                if (attachment_objects.find(std::string(object)) != attachment_objects.end())
+                {
+                    return true;
+                }
+
+                return attachment_objects.find(std::string("*")) != attachment_objects.end();
+            }
+        };
+
+        inline auto empty() const noexcept -> bool
+        {
+            return std::none_of(per_robot.begin(), per_robot.end(), [](const RobotFilter &filter) {
+                return filter.active();
+            });
+        }
+
+        inline auto ensure_robot(std::size_t index, std::size_t sphere_count) -> RobotFilter &
+        {
+            if (index >= per_robot.size())
+            {
+                per_robot.resize(index + 1U);
+            }
+
+            auto &filter = per_robot[index];
+            filter.ensure_sphere_capacity(sphere_count);
+            return filter;
+        }
+
+        inline auto robot(std::size_t index) noexcept -> RobotFilter *
+        {
+            if (index >= per_robot.size())
+            {
+                return nullptr;
+            }
+
+            return &per_robot[index];
+        }
+
+        inline auto robot(std::size_t index) const noexcept -> const RobotFilter *
+        {
+            if (index >= per_robot.size())
+            {
+                return nullptr;
+            }
+
+            return &per_robot[index];
+        }
+
+        std::vector<RobotFilter> per_robot;
+    };
+
     template <typename RobotT, std::size_t rake>
     struct MultiRobotState
     {
@@ -100,12 +229,20 @@ namespace vamp::collision
             }
         }
 
+        template <typename Robot, std::size_t rake>
+        inline auto collisions_allowed(
+            const MultiRobotCollisionFilter::RobotFilter &filter,
+            const collision::Environment<FloatVector<rake>> &environment,
+            const typename Robot::template ConfigurationBlock<rake> &configuration,
+            bool attachment_present) noexcept -> bool;
+
         template <typename RobotStateT, std::size_t rake>
         inline auto process_robot_state(
             const collision::Environment<FloatVector<rake>> &source_environment,
             const RobotStateT &state,
             typename RobotStateT::RobotType::template Spheres<rake> &spheres,
-            std::vector<collision::Sphere<FloatVector<rake>>> &attachment_spheres) noexcept -> bool
+            std::vector<collision::Sphere<FloatVector<rake>>> &attachment_spheres,
+            const MultiRobotCollisionFilter::RobotFilter *filter) noexcept -> bool
         {
             using Robot = typename RobotStateT::RobotType;
 
@@ -120,13 +257,27 @@ namespace vamp::collision
                 robot_environment.attachments.reset();
             }
 
-            const bool valid = state.attachment ?
-                                  Robot::template fkcc_attach<rake>(robot_environment, state.configuration) :
-                                  Robot::template fkcc<rake>(robot_environment, state.configuration);
+            bool valid = state.attachment ?
+                             Robot::template fkcc_attach<rake>(robot_environment, state.configuration) :
+                             Robot::template fkcc<rake>(robot_environment, state.configuration);
 
             if (not valid)
             {
-                return false;
+                if (filter == nullptr)
+                {
+                    return false;
+                }
+
+                if (not collisions_allowed<Robot, rake>(
+                        *filter,
+                        robot_environment,
+                        state.configuration,
+                        state.attachment != nullptr))
+                {
+                    return false;
+                }
+
+                valid = true;
             }
 
             Robot::sphere_fk(state.configuration, spheres);
@@ -404,6 +555,208 @@ namespace vamp::collision
 
             return has_attachment;
         }
+
+        inline auto set_contains(const std::unordered_set<std::string> &set, std::string_view value) -> bool
+        {
+            if (set.empty())
+            {
+                return false;
+            }
+
+            if (set.find(std::string(value)) != set.end())
+            {
+                return true;
+            }
+
+            return set.find(std::string("*")) != set.end();
+        }
+
+        template <typename Robot, std::size_t rake>
+        inline auto collisions_allowed(
+            const MultiRobotCollisionFilter::RobotFilter &filter,
+            const collision::Environment<FloatVector<rake>> &environment,
+            const typename Robot::template ConfigurationBlock<rake> &configuration,
+            bool attachment_present) noexcept -> bool
+        {
+            if (not filter.active())
+            {
+                return false;
+            }
+
+            const auto debug = Robot::template fkcc_debug<rake>(environment, configuration);
+
+            bool has_collision = false;
+
+            for (std::size_t sphere_index = 0; sphere_index < debug.first.size(); ++sphere_index)
+            {
+                const auto &objects = debug.first[sphere_index];
+                if (objects.empty())
+                {
+                    continue;
+                }
+
+                has_collision = true;
+                for (const auto &object : objects)
+                {
+                    if (filter.per_sphere_objects.size() <= sphere_index)
+                    {
+                        return false;
+                    }
+
+                    const auto &allowed = filter.per_sphere_objects[sphere_index];
+                    if (not set_contains(allowed, object))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            if (not debug.second.empty())
+            {
+                return false;
+            }
+
+            if (attachment_present && environment.attachments)
+            {
+                for (const auto &sphere : environment.attachments->posed_spheres)
+                {
+                    const auto collisions = sphere_environment_get_collisions(
+                        environment,
+                        sphere.x,
+                        sphere.y,
+                        sphere.z,
+                        sphere.r);
+
+                    if (collisions.empty())
+                    {
+                        continue;
+                    }
+
+                    has_collision = true;
+                    for (const auto &object : collisions)
+                    {
+                        if (not set_contains(filter.attachment_objects, object))
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+
+            return has_collision;
+        }
+
+        template <std::size_t rake, typename... States>
+        inline auto fkcc_multi_all_attach_impl(
+            const collision::Environment<FloatVector<rake>> &environment,
+            const MultiRobotCollisionFilter *filter,
+            const States &... states) noexcept -> bool
+        {
+            static_assert(sizeof...(States) > 0, "fkcc_multi_all_attach requires at least one robot state");
+
+            auto spheres = std::tuple<typename States::RobotType::template Spheres<rake>...>{};
+            auto attachments = std::tuple<
+                std::conditional_t<true, std::vector<collision::Sphere<FloatVector<rake>>>, States>...>{};
+
+            bool valid = true;
+
+            [&]<std::size_t... I>(std::index_sequence<I...>)
+            {
+                (..., ([&]
+                       {
+                           using StateT = std::tuple_element_t<I, std::tuple<States...>>;
+                           const auto *robot_filter =
+                               (filter != nullptr) ? filter->robot(I) : nullptr;
+
+                           if (not process_robot_state<StateT, rake>(
+                                   environment,
+                                   std::get<I>(std::forward_as_tuple(states...)),
+                                   std::get<I>(spheres),
+                                   std::get<I>(attachments),
+                                   robot_filter))
+                           {
+                               valid = false;
+                           }
+                       }()));
+            }(std::index_sequence_for<States...>{});
+
+            if (not valid)
+            {
+                return false;
+            }
+
+            if (spheres_cross<0>(spheres))
+            {
+                return false;
+            }
+
+            if (attachments_present(attachments))
+            {
+                if (attachments_vs_spheres_all<0>(attachments, spheres))
+                {
+                    return false;
+                }
+
+                if (attachments_vs_attachments_all<0>(attachments))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        template <std::size_t rake, typename... States>
+        inline auto fkcc_multi_self_attach_impl(const States &... states) noexcept -> bool
+        {
+            static_assert(sizeof...(States) > 0, "fkcc_multi_self_attach requires at least one robot state");
+
+            auto spheres = std::tuple<typename States::RobotType::template Spheres<rake>...>{};
+            auto attachments = std::tuple<
+                std::conditional_t<true, std::vector<collision::Sphere<FloatVector<rake>>>, States>...>{};
+
+            bool valid = true;
+
+            [&]<std::size_t... I>(std::index_sequence<I...>)
+            {
+                (..., ([&]
+                       {
+                           using StateT = std::tuple_element_t<I, std::tuple<States...>>;
+                           if (not detail::process_robot_state_self<StateT, rake>(
+                                   std::get<I>(std::forward_as_tuple(states...)),
+                                   std::get<I>(spheres),
+                                   std::get<I>(attachments)))
+                           {
+                               valid = false;
+                           }
+                       }()));
+            }(std::index_sequence_for<States...>{});
+
+            if (not valid)
+            {
+                return false;
+            }
+
+            if (spheres_cross<0>(spheres))
+            {
+                return false;
+            }
+
+            if (attachments_present(attachments))
+            {
+                if (attachments_vs_spheres_all<0>(attachments, spheres))
+                {
+                    return false;
+                }
+
+                if (attachments_vs_attachments_all<0>(attachments))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
     }  // namespace detail
 
     template <std::size_t rake, typename... States>
@@ -411,54 +764,16 @@ namespace vamp::collision
         const collision::Environment<FloatVector<rake>> &environment,
         const States &... states) noexcept -> bool
     {
-        static_assert(sizeof...(States) > 0, "fkcc_multi_all_attach requires at least one robot state");
+        return detail::fkcc_multi_all_attach_impl<rake>(environment, nullptr, states...);
+    }
 
-        auto spheres = std::tuple<typename States::RobotType::template Spheres<rake>...>{};
-        auto attachments = std::tuple<
-            std::conditional_t<true, std::vector<collision::Sphere<FloatVector<rake>>>, States>...>{};
-
-        bool valid = true;
-
-        [&]<std::size_t... I>(std::index_sequence<I...>)
-        {
-            (..., ([&]
-                   {
-                       using StateT = std::tuple_element_t<I, std::tuple<States...>>;
-                       if (not detail::process_robot_state<StateT, rake>(
-                               environment,
-                               std::get<I>(std::forward_as_tuple(states...)),
-                               std::get<I>(spheres),
-                               std::get<I>(attachments)))
-                       {
-                           valid = false;
-                       }
-                   }()));
-        }(std::index_sequence_for<States...>{});
-
-        if (not valid)
-        {
-            return false;
-        }
-
-        if (detail::spheres_cross<0>(spheres))
-        {
-            return false;
-        }
-
-        if (detail::attachments_present(attachments))
-        {
-            if (detail::attachments_vs_spheres_all<0>(attachments, spheres))
-            {
-                return false;
-            }
-
-            if (detail::attachments_vs_attachments_all<0>(attachments))
-            {
-                return false;
-            }
-        }
-
-        return true;
+    template <std::size_t rake, typename... States>
+    inline auto fkcc_multi_all_attach(
+        const collision::Environment<FloatVector<rake>> &environment,
+        const MultiRobotCollisionFilter &filter,
+        const States &... states) noexcept -> bool
+    {
+        return detail::fkcc_multi_all_attach_impl<rake>(environment, &filter, states...);
     }
 
     template <std::size_t rake, typename... States>
@@ -466,64 +781,27 @@ namespace vamp::collision
         const collision::Environment<FloatVector<rake>> &environment,
         const States &... states) noexcept -> bool
     {
-        return fkcc_multi_all_attach<rake>(environment, states...);
+        return detail::fkcc_multi_all_attach_impl<rake>(environment, nullptr, states...);
+    }
+
+    template <std::size_t rake, typename... States>
+    inline auto fkcc_multi_all(
+        const collision::Environment<FloatVector<rake>> &environment,
+        const MultiRobotCollisionFilter &filter,
+        const States &... states) noexcept -> bool
+    {
+        return detail::fkcc_multi_all_attach_impl<rake>(environment, &filter, states...);
     }
 
     template <std::size_t rake, typename... States>
     inline auto fkcc_multi_self_attach(const States &... states) noexcept -> bool
     {
-        static_assert(sizeof...(States) > 0, "fkcc_multi_self_attach requires at least one robot state");
-
-        auto spheres = std::tuple<typename States::RobotType::template Spheres<rake>...>{};
-        auto attachments = std::tuple<
-            std::conditional_t<true, std::vector<collision::Sphere<FloatVector<rake>>>, States>...>{};
-
-        bool valid = true;
-
-        [&]<std::size_t... I>(std::index_sequence<I...>)
-        {
-            (..., ([&]
-                   {
-                       using StateT = std::tuple_element_t<I, std::tuple<States...>>;
-                       if (not detail::process_robot_state_self<StateT, rake>(
-                               std::get<I>(std::forward_as_tuple(states...)),
-                               std::get<I>(spheres),
-                               std::get<I>(attachments)))
-                       {
-                           valid = false;
-                       }
-                   }()));
-        }(std::index_sequence_for<States...>{});
-
-        if (not valid)
-        {
-            return false;
-        }
-
-        if (detail::spheres_cross<0>(spheres))
-        {
-            return false;
-        }
-
-        if (detail::attachments_present(attachments))
-        {
-            if (detail::attachments_vs_spheres_all<0>(attachments, spheres))
-            {
-                return false;
-            }
-
-            if (detail::attachments_vs_attachments_all<0>(attachments))
-            {
-                return false;
-            }
-        }
-
-        return true;
+        return detail::fkcc_multi_self_attach_impl<rake>(states...);
     }
 
     template <std::size_t rake, typename... States>
     inline auto fkcc_multi_self(const States &... states) noexcept -> bool
     {
-        return fkcc_multi_self_attach<rake>(states...);
+        return detail::fkcc_multi_self_attach_impl<rake>(states...);
     }
 }  // namespace vamp::collision
