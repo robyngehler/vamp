@@ -20,6 +20,7 @@ __all__ = [
     "filter_pointcloud",
     "fkcc_multi_all",
     "fkcc_multi_self",
+    "compute_contacts",
     ]
 
 from pathlib import Path
@@ -47,6 +48,7 @@ from ._core import SimplifySettings as SimplifySettings
 from ._core import filter_pointcloud as filter_pointcloud
 from ._core import fkcc_multi_all as fkcc_multi_all
 from ._core import fkcc_multi_self as fkcc_multi_self
+from ._core import compute_contacts as compute_contacts
 
 robots = _core.robots()
 

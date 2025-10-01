@@ -1,5 +1,6 @@
 #include <vamp_python_init.hh>
 
+#include <cmath>
 #include <cstddef>
 #include <sstream>
 #include <string>
@@ -30,6 +31,8 @@ namespace
         Eigen::Isometry3f transform{Eigen::Isometry3f::Identity()};
         const vc::Attachment<float> *attachment = nullptr;
         nb::object attachment_owner;
+        std::string label;
+        bool has_label = false;
     };
 
     inline auto to_float_vector(nb::handle value) -> std::vector<float>
@@ -128,6 +131,12 @@ namespace
         state.robot = nb::cast<std::string>(mapping["robot"]);
         state.configuration = to_float_vector(mapping["configuration"]);
 
+        if (mapping.contains("label"))
+        {
+            state.label = nb::cast<std::string>(mapping["label"]);
+            state.has_label = true;
+        }
+
         nb::handle transform_handle;
         if (mapping.contains("transform"))
         {
@@ -196,6 +205,15 @@ namespace
         }
 
         return entries;
+    }
+
+    inline auto penetration(const vc::Sphere<float> &a, const vc::Sphere<float> &b) -> float
+    {
+        const float dx = a.x - b.x;
+        const float dy = a.y - b.y;
+        const float dz = a.z - b.z;
+        const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+        return distance - (a.r + b.r);
     }
 
     inline auto lookup_index(const nb::dict &mapping, const char *primary, const char *fallback) -> std::size_t
@@ -470,6 +488,43 @@ namespace
 
         return collision_free(prepared);
     }
+
+    inline auto prepare_debug_states(
+        const std::vector<RawState> &raw_states,
+        const std::vector<const vr::RegistryEntry *> &entries,
+        const vc::Environment<float> &environment,
+        const vc::MultiRobotCollisionFilter *filter) -> std::vector<vr::DebugState>
+    {
+        std::vector<vr::DebugState> prepared(raw_states.size());
+
+        for (std::size_t i = 0; i < raw_states.size(); ++i)
+        {
+            const auto &raw = raw_states[i];
+            const auto *entry = entries[i];
+
+            if (entry->debug_fn == nullptr)
+            {
+                throw nb::value_error("Robot does not expose debug preparation routine.");
+            }
+
+            const auto *robot_filter = (filter != nullptr) ? filter->robot(i) : nullptr;
+
+            if (not entry->debug_fn(
+                    raw.configuration,
+                    raw.transform,
+                    raw.attachment,
+                    &environment,
+                    robot_filter,
+                    prepared[i]))
+            {
+                prepared[i].valid = false;
+            }
+
+            prepared[i].registry = entry;
+        }
+
+        return prepared;
+    }
 }  // namespace
 
 void vamp::binding::init_multi_robot(nanobind::module_ &pymodule)
@@ -509,6 +564,226 @@ void vamp::binding::init_multi_robot(nanobind::module_ &pymodule)
         "environment"_a,
         nb::arg("allowed_collisions") = nb::none(),
         "Checks whether multiple robots are collision-free against each other and the shared environment.");
+
+    pymodule.def(
+        "compute_contacts",
+        [](const nb::sequence &states_seq,
+           const vc::Environment<float> &environment,
+           nb::handle allowed_collisions)
+        {
+            auto states = parse_states(states_seq);
+            if (states.empty())
+            {
+                throw nb::value_error("compute_contacts requires at least one robot state.");
+            }
+
+            auto entries = lookup_entries(states);
+            vc::MultiRobotCollisionFilter filter;
+            const vc::MultiRobotCollisionFilter *filter_ptr = nullptr;
+
+            if (allowed_collisions && not allowed_collisions.is_none())
+            {
+                parse_allowed_collisions(allowed_collisions, entries, filter);
+                filter_ptr = &filter;
+            }
+
+            auto prepared = prepare_debug_states(states, entries, environment, filter_ptr);
+
+            nb::dict result;
+            nb::list state_list;
+            const std::size_t count = prepared.size();
+
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                const auto &debug_state = prepared[i];
+
+                nb::dict state_dict;
+                state_dict["index"] = nb::int_(i);
+                state_dict["robot"] = nb::str(states[i].robot.c_str());
+                if (states[i].has_label)
+                {
+                    state_dict["label"] = nb::str(states[i].label.c_str());
+                }
+                state_dict["valid"] = nb::bool_(debug_state.valid);
+
+                nb::list spheres_list;
+                for (const auto &sphere : debug_state.spheres)
+                {
+                    spheres_list.append(sphere);
+                }
+                state_dict["spheres"] = std::move(spheres_list);
+
+                nb::list env_list;
+                for (const auto &per_sphere : debug_state.sphere_environment_collisions)
+                {
+                    nb::list per;
+                    for (const auto &object : per_sphere)
+                    {
+                        per.append(nb::str(object.c_str()));
+                    }
+                    env_list.append(std::move(per));
+                }
+                state_dict["environment"] = std::move(env_list);
+
+                nb::list self_list;
+                for (const auto &pair : debug_state.self_collisions)
+                {
+                    if (pair.first >= debug_state.spheres.size() || pair.second >= debug_state.spheres.size())
+                    {
+                        continue;
+                    }
+
+                    nb::dict entry;
+                    entry["a"] = nb::int_(pair.first);
+                    entry["b"] = nb::int_(pair.second);
+                    entry["penetration"] = nb::float_(penetration(
+                        debug_state.spheres[pair.first],
+                        debug_state.spheres[pair.second]));
+                    self_list.append(std::move(entry));
+                }
+                state_dict["self"] = std::move(self_list);
+
+                nb::list attachments_list;
+                for (const auto &sphere : debug_state.attachments)
+                {
+                    attachments_list.append(sphere);
+                }
+                state_dict["attachments"] = std::move(attachments_list);
+
+                nb::list attachment_env_list;
+                for (const auto &per_attachment : debug_state.attachment_environment_collisions)
+                {
+                    nb::list per;
+                    for (const auto &object : per_attachment)
+                    {
+                        per.append(nb::str(object.c_str()));
+                    }
+                    attachment_env_list.append(std::move(per));
+                }
+                state_dict["attachments_environment"] = std::move(attachment_env_list);
+
+                nb::list attachment_self_list;
+                for (std::size_t ai = 0; ai < debug_state.attachments.size(); ++ai)
+                {
+                    const auto &attachment_sphere = debug_state.attachments[ai];
+                    for (std::size_t si = 0; si < debug_state.spheres.size(); ++si)
+                    {
+                        const float pen = penetration(attachment_sphere, debug_state.spheres[si]);
+                        if (pen <= 0.F)
+                        {
+                            nb::dict entry;
+                            entry["attachment_index"] = nb::int_(ai);
+                            entry["sphere_index"] = nb::int_(si);
+                            entry["penetration"] = nb::float_(pen);
+                            attachment_self_list.append(std::move(entry));
+                        }
+                    }
+                }
+                state_dict["attachment_self"] = std::move(attachment_self_list);
+
+                state_list.append(std::move(state_dict));
+            }
+
+            result["states"] = std::move(state_list);
+
+            nb::list cross_sphere_list;
+            nb::list cross_attachment_sphere_list;
+            nb::list cross_attachment_attachment_list;
+
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                for (std::size_t j = i + 1; j < count; ++j)
+                {
+                    const auto &spheres_i = prepared[i].spheres;
+                    const auto &spheres_j = prepared[j].spheres;
+
+                    for (std::size_t si = 0; si < spheres_i.size(); ++si)
+                    {
+                        for (std::size_t sj = 0; sj < spheres_j.size(); ++sj)
+                        {
+                            const float pen = penetration(spheres_i[si], spheres_j[sj]);
+                            if (pen <= 0.F)
+                            {
+                                nb::dict entry;
+                                entry["first_state"] = nb::int_(i);
+                                entry["first_sphere"] = nb::int_(si);
+                                entry["second_state"] = nb::int_(j);
+                                entry["second_sphere"] = nb::int_(sj);
+                                entry["penetration"] = nb::float_(pen);
+                                cross_sphere_list.append(std::move(entry));
+                            }
+                        }
+                    }
+
+                    const auto &attachments_i = prepared[i].attachments;
+                    const auto &attachments_j = prepared[j].attachments;
+
+                    for (std::size_t ai = 0; ai < attachments_i.size(); ++ai)
+                    {
+                        for (std::size_t sj = 0; sj < spheres_j.size(); ++sj)
+                        {
+                            const float pen = penetration(attachments_i[ai], spheres_j[sj]);
+                            if (pen <= 0.F)
+                            {
+                                nb::dict entry;
+                                entry["attachment_state"] = nb::int_(i);
+                                entry["attachment_index"] = nb::int_(ai);
+                                entry["sphere_state"] = nb::int_(j);
+                                entry["sphere_index"] = nb::int_(sj);
+                                entry["penetration"] = nb::float_(pen);
+                                cross_attachment_sphere_list.append(std::move(entry));
+                            }
+                        }
+                    }
+
+                    for (std::size_t aj = 0; aj < attachments_j.size(); ++aj)
+                    {
+                        for (std::size_t si = 0; si < spheres_i.size(); ++si)
+                        {
+                            const float pen = penetration(attachments_j[aj], spheres_i[si]);
+                            if (pen <= 0.F)
+                            {
+                                nb::dict entry;
+                                entry["attachment_state"] = nb::int_(j);
+                                entry["attachment_index"] = nb::int_(aj);
+                                entry["sphere_state"] = nb::int_(i);
+                                entry["sphere_index"] = nb::int_(si);
+                                entry["penetration"] = nb::float_(pen);
+                                cross_attachment_sphere_list.append(std::move(entry));
+                            }
+                        }
+                    }
+
+                    for (std::size_t ai = 0; ai < attachments_i.size(); ++ai)
+                    {
+                        for (std::size_t aj = 0; aj < attachments_j.size(); ++aj)
+                        {
+                            const float pen = penetration(attachments_i[ai], attachments_j[aj]);
+                            if (pen <= 0.F)
+                            {
+                                nb::dict entry;
+                                entry["first_state"] = nb::int_(i);
+                                entry["first_attachment"] = nb::int_(ai);
+                                entry["second_state"] = nb::int_(j);
+                                entry["second_attachment"] = nb::int_(aj);
+                                entry["penetration"] = nb::float_(pen);
+                                cross_attachment_attachment_list.append(std::move(entry));
+                            }
+                        }
+                    }
+                }
+            }
+
+            result["cross_sphere"] = std::move(cross_sphere_list);
+            result["cross_attachment_sphere"] = std::move(cross_attachment_sphere_list);
+            result["cross_attachment_attachment"] = std::move(cross_attachment_attachment_list);
+
+            return result;
+        },
+        "states"_a,
+        "environment"_a,
+        nb::arg("allowed_collisions") = nb::none(),
+        "Compute per-state and cross-state contact information, including attachments.");
 
     pymodule.def(
         "fkcc_multi_self",

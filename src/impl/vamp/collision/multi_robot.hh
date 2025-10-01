@@ -229,6 +229,102 @@ namespace vamp::collision
             }
         }
 
+        inline auto is_identity_transform(const Eigen::Isometry3f &tf) noexcept -> bool
+        {
+            return tf.linear().isIdentity(1e-6F) && tf.translation().isZero(1e-6F);
+        }
+
+        inline auto transform_environment_to_robot_frame(
+            collision::Environment<float> &environment,
+            const Eigen::Isometry3f &base_transform) noexcept -> void
+        {
+            const Eigen::Matrix3f rotation_inv = base_transform.linear().transpose();
+            const Eigen::Vector3f translation = base_transform.translation();
+
+            auto transform_point = [&](float x, float y, float z) noexcept -> Eigen::Vector3f
+            {
+                Eigen::Vector3f result{x, y, z};
+                result -= translation;
+                result = rotation_inv * result;
+                return result;
+            };
+
+            auto transform_direction = [&](float x, float y, float z) noexcept -> Eigen::Vector3f
+            {
+                return rotation_inv * Eigen::Vector3f{x, y, z};
+            };
+
+            for (auto &sphere : environment.spheres)
+            {
+                const Eigen::Vector3f point = transform_point(sphere.x, sphere.y, sphere.z);
+                sphere.x = point.x();
+                sphere.y = point.y();
+                sphere.z = point.z();
+            }
+
+            auto transform_segment = [&](auto &segment) noexcept
+            {
+                const Eigen::Vector3f start(segment.x1, segment.y1, segment.z1);
+                const Eigen::Vector3f end = start + Eigen::Vector3f(segment.xv, segment.yv, segment.zv);
+
+                const Eigen::Vector3f start_local = transform_point(start.x(), start.y(), start.z());
+                const Eigen::Vector3f end_local = transform_point(end.x(), end.y(), end.z());
+                const Eigen::Vector3f delta = end_local - start_local;
+
+                segment.x1 = start_local.x();
+                segment.y1 = start_local.y();
+                segment.z1 = start_local.z();
+                segment.xv = delta.x();
+                segment.yv = delta.y();
+                segment.zv = delta.z();
+            };
+
+            for (auto &capsule : environment.capsules)
+            {
+                transform_segment(capsule);
+            }
+            for (auto &capsule : environment.z_aligned_capsules)
+            {
+                transform_segment(capsule);
+            }
+            for (auto &cylinder : environment.cylinders)
+            {
+                transform_segment(cylinder);
+            }
+
+            auto transform_cuboid = [&](auto &cuboid) noexcept
+            {
+                const Eigen::Vector3f center = transform_point(cuboid.x, cuboid.y, cuboid.z);
+                cuboid.x = center.x();
+                cuboid.y = center.y();
+                cuboid.z = center.z();
+
+                const Eigen::Vector3f axis1 = transform_direction(cuboid.axis_1_x, cuboid.axis_1_y, cuboid.axis_1_z);
+                cuboid.axis_1_x = axis1.x();
+                cuboid.axis_1_y = axis1.y();
+                cuboid.axis_1_z = axis1.z();
+
+                const Eigen::Vector3f axis2 = transform_direction(cuboid.axis_2_x, cuboid.axis_2_y, cuboid.axis_2_z);
+                cuboid.axis_2_x = axis2.x();
+                cuboid.axis_2_y = axis2.y();
+                cuboid.axis_2_z = axis2.z();
+
+                const Eigen::Vector3f axis3 = transform_direction(cuboid.axis_3_x, cuboid.axis_3_y, cuboid.axis_3_z);
+                cuboid.axis_3_x = axis3.x();
+                cuboid.axis_3_y = axis3.y();
+                cuboid.axis_3_z = axis3.z();
+            };
+
+            for (auto &cuboid : environment.cuboids)
+            {
+                transform_cuboid(cuboid);
+            }
+            for (auto &cuboid : environment.z_aligned_cuboids)
+            {
+                transform_cuboid(cuboid);
+            }
+        }
+
         template <typename Robot, std::size_t rake>
         inline auto collisions_allowed(
             const MultiRobotCollisionFilter::RobotFilter &filter,
@@ -246,7 +342,17 @@ namespace vamp::collision
         {
             using Robot = typename RobotStateT::RobotType;
 
-            collision::Environment<FloatVector<rake>> robot_environment(source_environment);
+            collision::Environment<FloatVector<rake>> robot_environment;
+            if (detail::is_identity_transform(state.base_transform))
+            {
+                robot_environment = source_environment;
+            }
+            else
+            {
+                collision::Environment<float> float_environment(source_environment);
+                detail::transform_environment_to_robot_frame(float_environment, state.base_transform);
+                robot_environment = collision::Environment<FloatVector<rake>>(float_environment);
+            }
 
             if (state.attachment)
             {

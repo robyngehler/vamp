@@ -67,6 +67,10 @@ class RobotRuntime:
     slider_ids: Sequence[int]
     configuration: np.ndarray  # working buffer
     joint_limits: Sequence[Tuple[float, float]]
+    attachment: Optional[vamp.Attachment] = None
+    attachment_body: Optional[int] = None
+    attachment_transform: Optional[np.ndarray] = None  # 4x4 relative TF
+    attachment_color: Optional[Sequence[float]] = None
 
 
 @dataclass
@@ -74,6 +78,379 @@ class ObstacleSpec:
     kind: str
     position: np.ndarray
     size: np.ndarray
+    color: Optional[Sequence[float]] = None
+    name: Optional[str] = None
+
+
+@dataclass
+class AttachmentSpec:
+    kind: str
+    translation: Sequence[float]
+    rotation_rpy: Sequence[float]
+    length: float
+    radius: float
+    color: Optional[Sequence[float]] = None
+    sphere_radius: Optional[float] = None
+    min_spheres: int = 0
+
+    def relative_transform(self) -> np.ndarray:
+        tf = np.eye(4, dtype=np.float32)
+        tf[:3, :3] = euler_matrix(*self.rotation_rpy)[:3, :3].astype(np.float32)
+        tf[:3, 3] = np.asarray(self.translation, dtype=np.float32)
+        return tf
+
+    def build_attachment(self) -> vamp.Attachment:
+        relative = self.relative_transform()
+        attachment = vamp.Attachment(relative)
+        if self.kind == "cylinder":
+            cylinder = vamp.Cylinder([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], float(self.radius), float(self.length))
+            attachment.add_cylinder(cylinder, self.sphere_radius or -1.0, self.min_spheres)
+        elif self.kind == "cuboid":
+            half_extents = [float(self.radius), float(self.radius), float(self.length) / 2.0]
+            cuboid = vamp.Cuboid([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], half_extents)
+            attachment.add_cuboid(cuboid, self.sphere_radius or -1.0, self.min_spheres)
+        else:
+            raise ValueError(f"Unsupported attachment kind '{self.kind}'")
+        return attachment
+
+
+def _hollow_box_obstacles(
+    center: Sequence[float],
+    size: Sequence[float],
+    color: Optional[Sequence[float]] = None,
+    thickness: float = 0.02,
+) -> List[ObstacleSpec]:
+    cx, cy, cz = (float(v) for v in center)
+    length, width, height = (float(v) for v in size)
+    color_arr = list(color) if color is not None else None
+
+    obstacles: List[ObstacleSpec] = []
+
+    bottom_size = np.asarray([length, width, thickness], dtype=np.float32)
+    bottom_pos = np.asarray([cx, cy, cz], dtype=np.float32)
+    obstacles.append(ObstacleSpec("cube", bottom_pos, bottom_size, color_arr))
+
+    side_z = cz + thickness * 0.5 + height * 0.5
+    front_size = np.asarray([length, thickness, height], dtype=np.float32)
+    front_pos = np.asarray([cx, cy + width / 2.0, side_z], dtype=np.float32)
+    back_pos = np.asarray([cx, cy - width / 2.0, side_z], dtype=np.float32)
+    obstacles.append(ObstacleSpec("cube", front_pos, front_size, color_arr))
+    obstacles.append(ObstacleSpec("cube", back_pos, front_size, color_arr))
+
+    side_size = np.asarray([thickness, width, height], dtype=np.float32)
+    left_pos = np.asarray([cx - length / 2.0, cy, side_z], dtype=np.float32)
+    right_pos = np.asarray([cx + length / 2.0, cy, side_z], dtype=np.float32)
+    obstacles.append(ObstacleSpec("cube", left_pos, side_size, color_arr))
+    obstacles.append(ObstacleSpec("cube", right_pos, side_size, color_arr))
+
+    return obstacles
+
+@dataclass
+class PresetConfig:
+    robot_specs: List[str]
+    attachments: Dict[str, AttachmentSpec]
+    obstacles: List[ObstacleSpec]
+
+PRESETS: Dict[str, PresetConfig] = {
+    "panda_two_rod": PresetConfig(
+        robot_specs=[
+            "panda0=panda@0.4,0.0,0.1@0.0,0.0,-3.141592653589793",
+            "panda1=panda@-0.4,0.0,0.1@0.0,0.0,0.0",
+        ],
+        attachments={
+            "panda0": AttachmentSpec(
+                kind="cylinder",
+                translation=[0.0, 0.0, -0.0466],
+                rotation_rpy=[0.0, 1.5707963267948966, 0.0],
+                length=0.5,
+                radius=0.015,
+                color=[0.0, 1.0, 0.0, 0.8],
+                min_spheres=5,
+            ),
+            "panda1": AttachmentSpec(
+                kind="cylinder",
+                translation=[0.0, 0.0, -0.0466],
+                rotation_rpy=[0.0, 1.5707963267948966, 0.0],
+                length=0.5,
+                radius=0.015,
+                color=[0.0, 0.0, 1.0, 0.8],
+                min_spheres=5,
+            ),
+        },
+        obstacles=[
+            ObstacleSpec(
+                kind="cube",
+                position=np.asarray([0.0, 0.0, 0.05], dtype=np.float32),
+                size=np.asarray([0.6, 2.0, 0.1], dtype=np.float32),
+                color=[0.7, 0.7, 0.7, 0.2],
+                name="floor1",
+            ),
+            ObstacleSpec(
+                kind="cube",
+                position=np.asarray([0.75, 0.0, 0.05], dtype=np.float32),
+                size=np.asarray([0.5, 2.0, 0.1], dtype=np.float32),
+                color=[0.7, 0.7, 0.7, 0.2],
+                name="floor2",
+            ),
+            ObstacleSpec(
+                kind="cube",
+                position=np.asarray([-0.75, 0.0, 0.05], dtype=np.float32),
+                size=np.asarray([0.5, 2.0, 0.1], dtype=np.float32),
+                color=[0.7, 0.7, 0.7, 0.2],
+                name="floor3",
+            ),
+            ObstacleSpec(
+                kind="cube",
+                position=np.asarray([0.4, 0.55, 0.05], dtype=np.float32),
+                size=np.asarray([0.2, 0.9, 0.1], dtype=np.float32),
+                color=[0.7, 0.7, 0.7, 0.2],
+                name="floor4",
+            ),
+            ObstacleSpec(
+                kind="cube",
+                position=np.asarray([0.4, -0.55, 0.05], dtype=np.float32),
+                size=np.asarray([0.2, 0.9, 0.1], dtype=np.float32),
+                color=[0.7, 0.7, 0.7, 0.2],
+                name="floor5",
+            ),
+            ObstacleSpec(
+                kind="cube",
+                position=np.asarray([-0.4, 0.55, 0.05], dtype=np.float32),
+                size=np.asarray([0.2, 0.9, 0.1], dtype=np.float32),
+                color=[0.7, 0.7, 0.7, 0.2],
+                name="floor6",
+            ),
+            ObstacleSpec(
+                kind="cube",
+                position=np.asarray([-0.4, -0.55, 0.05], dtype=np.float32),
+                size=np.asarray([0.2, 0.9, 0.1], dtype=np.float32),
+                color=[0.7, 0.7, 0.7, 0.2],
+                name="floor7",
+            ),
+        ],
+    ),
+    "panda_two": PresetConfig(
+        robot_specs=[
+            "panda0=panda@0.4,0.0,0.1@0.0,0.0,-3.141592653589793",
+            "panda1=panda@-0.4,0.0,0.1@0.0,0.0,0.0",
+        ],
+        attachments={},
+        obstacles=[
+            ObstacleSpec(
+                kind="cube",
+                position=np.asarray([0.0, 0.0, 0.05], dtype=np.float32),
+                size=np.asarray([0.6, 2.0, 0.1], dtype=np.float32),
+                color=[0.7, 0.7, 0.7, 0.2],
+                name="floor1",
+            ),
+            ObstacleSpec(
+                kind="cube",
+                position=np.asarray([0.75, 0.0, 0.05], dtype=np.float32),
+                size=np.asarray([0.5, 2.0, 0.1], dtype=np.float32),
+                color=[0.7, 0.7, 0.7, 0.2],
+                name="floor2",
+            ),
+            ObstacleSpec(
+                kind="cube",
+                position=np.asarray([-0.75, 0.0, 0.05], dtype=np.float32),
+                size=np.asarray([0.5, 2.0, 0.1], dtype=np.float32),
+                color=[0.7, 0.7, 0.7, 0.2],
+                name="floor3",
+            ),
+            ObstacleSpec(
+                kind="cube",
+                position=np.asarray([0.4, 0.55, 0.05], dtype=np.float32),
+                size=np.asarray([0.2, 0.9, 0.1], dtype=np.float32),
+                color=[0.7, 0.7, 0.7, 0.2],
+                name="floor4",
+            ),
+            ObstacleSpec(
+                kind="cube",
+                position=np.asarray([0.4, -0.55, 0.05], dtype=np.float32),
+                size=np.asarray([0.2, 0.9, 0.1], dtype=np.float32),
+                color=[0.7, 0.7, 0.7, 0.2],
+                name="floor5",
+            ),
+            ObstacleSpec(
+                kind="cube",
+                position=np.asarray([-0.4, 0.55, 0.05], dtype=np.float32),
+                size=np.asarray([0.2, 0.9, 0.1], dtype=np.float32),
+                color=[0.7, 0.7, 0.7, 0.2],
+                name="floor6",
+            ),
+            ObstacleSpec(
+                kind="cube",
+                position=np.asarray([-0.4, -0.55, 0.05], dtype=np.float32),
+                size=np.asarray([0.2, 0.9, 0.1], dtype=np.float32),
+                color=[0.7, 0.7, 0.7, 0.2],
+                name="floor7",
+            ),
+        ],
+    ),
+    "panda_four": PresetConfig(
+        robot_specs=[
+            "panda0=panda@0.4,-0.4,0.1@0.0,0.0,2.28",
+            "panda1=panda@-0.4,-0.4,0.1@0.0,0.0,0.66",
+            "panda2=panda@-0.4,0.4,0.1@0.0,0.0,-0.66",
+            "panda3=panda@0.4,0.4,0.1@0.0,0.0,-2.28",
+        ],
+        attachments={},
+        obstacles=[],
+    ),
+    "panda_four_binpick": PresetConfig(
+        robot_specs=[
+            "panda0=panda@0.4,-0.4,0.1@0.0,0.0,2.28",
+            "panda1=panda@-0.4,-0.4,0.1@0.0,0.0,0.66",
+            "panda2=panda@-0.4,0.4,0.1@0.0,0.0,-0.66",
+            "panda3=panda@0.4,0.4,0.1@0.0,0.0,-2.28",
+        ],
+        attachments={
+            "panda0": AttachmentSpec(
+                kind="cylinder",
+                translation=[0.0, 0.0, 0.0],
+                rotation_rpy=[0.0, 1.5707963267948966, 0.0],
+                length=0.3,
+                radius=0.01,
+                color=[0.0, 1.0, 0.0, 0.8],
+                min_spheres=3,
+            ),
+            "panda1": AttachmentSpec(
+                kind="cylinder",
+                translation=[0.0, 0.0, 0.0],
+                rotation_rpy=[0.0, 1.5707963267948966, 0.0],
+                length=0.3,
+                radius=0.01,
+                color=[1.0, 0.0, 0.0, 0.8],
+                min_spheres=3,
+            ),
+            "panda2": AttachmentSpec(
+                kind="cylinder",
+                translation=[0.0, 0.0, 0.0],
+                rotation_rpy=[0.0, 1.5707963267948966, 0.0],
+                length=0.3,
+                radius=0.01,
+                color=[0.0, 0.0, 1.0, 0.8],
+                min_spheres=3,
+            ),
+            "panda3": AttachmentSpec(
+                kind="cylinder",
+                translation=[0.0, 0.0, 0.0],
+                rotation_rpy=[0.0, 1.5707963267948966, 0.0],
+                length=0.3,
+                radius=0.01,
+                color=[1.0, 1.0, 0.0, 0.8],
+                min_spheres=3,
+            ),
+        },
+        obstacles=[
+            *_hollow_box_obstacles(
+                center=[0.0, 0.0, 0.0],
+                size=[0.5, 0.5, 0.5],
+                color=[0.0, 0.0, 1.0, 0.4],
+            ),
+            *_hollow_box_obstacles(
+                center=[0.5, 0.0, 0.0],
+                size=[0.5, 0.5, 0.5],
+                color=[0.0, 1.0, 0.0, 0.4],
+            ),
+            *_hollow_box_obstacles(
+                center=[-0.5, 0.0, 0.0],
+                size=[0.5, 0.5, 0.5],
+                color=[1.0, 0.0, 0.0, 0.4],
+            ),
+            *_hollow_box_obstacles(
+                center=[0.0, 0.5, 0.0],
+                size=[0.5, 0.5, 0.5],
+                color=[1.0, 1.0, 0.0, 0.4],
+            ),
+            *_hollow_box_obstacles(
+                center=[0.0, -0.5, 0.0],
+                size=[0.5, 0.5, 0.5],
+                color=[0.5, 0.0, 0.5, 0.4],
+            ),
+        ],
+    ),
+}
+
+def _create_attachment_body(
+    client: BulletClient,
+    spec: AttachmentSpec,
+    attachment: vamp.Attachment,
+) -> int:
+    identity = np.eye(4, dtype=np.float32)
+    attachment.set_ee_pose(identity)
+
+    rgba = list(spec.color) if spec.color is not None else [0.2, 0.6, 0.8, 0.6]
+
+    if spec.kind == "cylinder":
+        collision = client.createCollisionShape(
+            pb.GEOM_CYLINDER,
+            radius=float(spec.radius),
+            height=float(spec.length),
+        )
+        visual = client.createVisualShape(
+            pb.GEOM_CYLINDER,
+            radius=float(spec.radius),
+            length=float(spec.length),
+            rgbaColor=rgba,
+        )
+    elif spec.kind == "cuboid":
+        half_extents = [float(spec.radius), float(spec.radius), float(spec.length) * 0.5]
+        collision = client.createCollisionShape(pb.GEOM_BOX, halfExtents=half_extents)
+        visual = client.createVisualShape(
+            pb.GEOM_BOX,
+            halfExtents=half_extents,
+            rgbaColor=rgba,
+        )
+    else:
+        raise ValueError(f"Unsupported attachment kind '{spec.kind}'")
+
+    body_id = client.createMultiBody(
+        baseMass=0.0,
+        baseCollisionShapeIndex=collision,
+        baseVisualShapeIndex=visual,
+        basePosition=[0.0, 0.0, 0.0],
+        baseOrientation=[0.0, 0.0, 0.0, 1.0],
+    )
+    return body_id
+
+
+def _update_attachment_pose(
+    client: BulletClient,
+    runtime: RobotRuntime,
+    ee_transform: np.ndarray,
+) -> None:
+    if runtime.attachment is None or runtime.attachment_transform is None:
+        return
+
+    base_tf = runtime.spec.transform
+    world_ee_tf = (base_tf @ ee_transform).astype(np.float32, copy=False)
+    runtime.attachment.set_ee_pose(world_ee_tf)
+    world_tf = world_ee_tf @ runtime.attachment_transform
+    position = world_tf[:3, 3]
+    quat_xyzw = quaternion_from_matrix(world_tf)
+    client.resetBasePositionAndOrientation(
+        runtime.attachment_body,
+        position.tolist(),
+        (float(quat_xyzw[0]), float(quat_xyzw[1]), float(quat_xyzw[2]), float(quat_xyzw[3])),
+    )
+
+
+
+def _build_state(runtime: RobotRuntime, client: BulletClient) -> Dict[str, object]:
+    state = {
+        "robot": runtime.spec.name,
+        "configuration": runtime.configuration.tolist(),
+        "transform": runtime.spec.transform.astype(np.float32),
+        "label": runtime.spec.label,
+    }
+
+    if runtime.attachment is not None and runtime.attachment_transform is not None:
+        ee_tf = runtime.module.eefk(runtime.configuration.tolist())
+        _update_attachment_pose(client, runtime, ee_tf)
+        state["attachment"] = runtime.attachment
+
+    return state
 
 
 def _parse_float_list(text: str) -> List[float]:
@@ -127,6 +504,16 @@ IGNORED_LINK_COLLISIONS: Dict[str, Set[Tuple[str, str]]] = _normalize_link_pairs
         ]
     }
 )
+
+
+ATTACHMENT_COLLISION_EXCLUDES: Dict[str, Set[str]] = {
+    "panda": {
+        "panda_grasptarget",
+        "panda_hand",
+        "panda_leftfinger",
+        "panda_rightfinger",
+    }
+}
 
 
 def _should_ignore_link_collision(robot_name: str, link_a: str, link_b: str) -> bool:
@@ -233,82 +620,140 @@ def _build_initial_overrides(specs: Sequence[RobotSpec], raw_states: Optional[Se
     return overrides
 
 
-def _world_spheres(runtime: RobotRuntime) -> List[Tuple[np.ndarray, float]]:
-    transform = runtime.spec.transform.astype(np.float32)
-    spheres = runtime.module.fk(runtime.configuration.tolist())
-    world: List[Tuple[np.ndarray, float]] = []
-    for sphere in spheres:
-        local = np.array([sphere.x, sphere.y, sphere.z, 1.0], dtype=np.float32)
-        position = transform @ local
-        world.append((position[:3], float(sphere.r)))
-    return world
-
-
-def _spheres_collide(center_a: np.ndarray, radius_a: float, center_b: np.ndarray, radius_b: float) -> bool:
-    delta = center_a - center_b
-    distance_sq = float(np.dot(delta, delta))
-    radius_sum = radius_a + radius_b
-    return distance_sq <= float(radius_sum * radius_sum)
-
-
 def _compute_vamp_contacts(
-    runtimes: Sequence[RobotRuntime], env: vamp.Environment
+    runtimes: Sequence[RobotRuntime],
+    env: vamp.Environment,
+    states: Sequence[Dict[str, object]],
 ) -> Tuple[Set[str], List[str]]:
     summaries: Set[str] = set()
     lines: List[str] = []
 
-    world_spheres = [_world_spheres(runtime) for runtime in runtimes]
+    contact_report = dict(vamp.compute_contacts(states, env))
+    per_state_raw = list(contact_report.get("states", []))
 
-    for runtime, spheres_world in zip(runtimes, world_spheres):
-        env_hits, self_pairs = runtime.module.debug(runtime.configuration.tolist(), env)
+    for runtime, state_report_raw in zip(runtimes, per_state_raw):
+        state_report = dict(state_report_raw)
+        label = runtime.spec.label
 
+        env_hits = state_report.get("environment", [])
         for sphere_index, hits in enumerate(env_hits):
             if not hits:
                 continue
             unique_hits = sorted({str(name) for name in hits})
-            key = f"env|{runtime.spec.label}|{sphere_index}|{','.join(unique_hits)}"
-            if key not in summaries:
-                summaries.add(key)
-                lines.append(
-                    f"{runtime.spec.label}: sphere {sphere_index} vs environment ({', '.join(unique_hits)})"
-                )
-
-        for pair in self_pairs:
-            a, b = sorted(pair)
-            key = f"self|{runtime.spec.label}|{a}|{b}"
+            key = f"env|{label}|{sphere_index}|{','.join(unique_hits)}"
             if key in summaries:
                 continue
             summaries.add(key)
-            penetration = (
-                float(np.linalg.norm(spheres_world[a][0] - spheres_world[b][0]))
-                - (spheres_world[a][1] + spheres_world[b][1])
-            )
             lines.append(
-                f"{runtime.spec.label}: sphere {a} <> sphere {b} (penetration {penetration:.4f} m)"
+                f"{label}: sphere {sphere_index} vs environment ({', '.join(unique_hits)})"
             )
 
-    for first in range(len(runtimes)):
-        for second in range(first + 1, len(runtimes)):
-            label_a = runtimes[first].spec.label
-            label_b = runtimes[second].spec.label
-            for idx_a, (center_a, radius_a) in enumerate(world_spheres[first]):
-                for idx_b, (center_b, radius_b) in enumerate(world_spheres[second]):
-                    if not _spheres_collide(center_a, radius_a, center_b, radius_b):
-                        continue
-                    key = f"cross|{label_a}|{idx_a}|{label_b}|{idx_b}"
-                    if key in summaries:
-                        continue
-                    summaries.add(key)
-                    penetration = float(np.linalg.norm(center_a - center_b)) - (radius_a + radius_b)
-                    lines.append(
-                        f"{label_a} sphere {idx_a} <> {label_b} sphere {idx_b} "
-                        f"(penetration {penetration:.4f} m)"
-                    )
+        for self_entry_raw in state_report.get("self", []):
+            self_entry = dict(self_entry_raw)
+            idx_a = int(self_entry["a"])
+            idx_b = int(self_entry["b"])
+            if idx_a > idx_b:
+                idx_a, idx_b = idx_b, idx_a
+            key = f"self|{label}|{idx_a}|{idx_b}"
+            if key in summaries:
+                continue
+            summaries.add(key)
+            penetration = float(self_entry["penetration"])
+            lines.append(
+                f"{label}: sphere {idx_a} <> sphere {idx_b} (penetration {penetration:.4f} m)"
+            )
+
+        attachments_env = state_report.get("attachments_environment", [])
+        for attachment_index, hits in enumerate(attachments_env):
+            if not hits:
+                continue
+            unique_hits = sorted({str(name) for name in hits})
+            key = f"attach_env|{label}|{attachment_index}|{','.join(unique_hits)}"
+            if key in summaries:
+                continue
+            summaries.add(key)
+            lines.append(
+                f"{label}: attachment {attachment_index} vs environment ({', '.join(unique_hits)})"
+            )
+
+        for entry_raw in state_report.get("attachment_self", []):
+            entry = dict(entry_raw)
+            attachment_index = int(entry["attachment_index"])
+            sphere_index = int(entry["sphere_index"])
+            key = f"attach_self|{label}|{attachment_index}|{sphere_index}"
+            if key in summaries:
+                continue
+            summaries.add(key)
+            penetration = float(entry["penetration"])
+            lines.append(
+                f"{label}: attachment {attachment_index} <> sphere {sphere_index} "
+                f"(penetration {penetration:.4f} m)"
+            )
+
+    cross_sphere = list(contact_report.get("cross_sphere", []))
+    for entry_raw in cross_sphere:
+        entry = dict(entry_raw)
+        first_state = int(entry["first_state"])
+        second_state = int(entry["second_state"])
+        label_a = runtimes[first_state].spec.label
+        label_b = runtimes[second_state].spec.label
+        sphere_a = int(entry["first_sphere"])
+        sphere_b = int(entry["second_sphere"])
+        key = f"cross|{label_a}|{sphere_a}|{label_b}|{sphere_b}"
+        if key in summaries:
+            continue
+        summaries.add(key)
+        penetration = float(entry["penetration"])
+        lines.append(
+            f"{label_a} sphere {sphere_a} <> {label_b} sphere {sphere_b} "
+            f"(penetration {penetration:.4f} m)"
+        )
+
+    cross_attach_sphere = list(contact_report.get("cross_attachment_sphere", []))
+    for entry_raw in cross_attach_sphere:
+        entry = dict(entry_raw)
+        attachment_state = int(entry["attachment_state"])
+        sphere_state = int(entry["sphere_state"])
+        attachment_idx = int(entry["attachment_index"])
+        sphere_idx = int(entry["sphere_index"])
+        label_a = runtimes[attachment_state].spec.label
+        label_b = runtimes[sphere_state].spec.label
+        key = f"attach_cross|{label_a}|{attachment_idx}|{label_b}|{sphere_idx}"
+        if key in summaries:
+            continue
+        summaries.add(key)
+        penetration = float(entry["penetration"])
+        lines.append(
+            f"{label_a} attachment {attachment_idx} <> {label_b} sphere {sphere_idx} "
+            f"(penetration {penetration:.4f} m)"
+        )
+
+    cross_attach_attach = list(contact_report.get("cross_attachment_attachment", []))
+    for entry_raw in cross_attach_attach:
+        entry = dict(entry_raw)
+        first_state = int(entry["first_state"])
+        second_state = int(entry["second_state"])
+        attach_a = int(entry["first_attachment"])
+        attach_b = int(entry["second_attachment"])
+        label_a = runtimes[first_state].spec.label
+        label_b = runtimes[second_state].spec.label
+        key = f"attach_attach|{label_a}|{attach_a}|{label_b}|{attach_b}"
+        if key in summaries:
+            continue
+        summaries.add(key)
+        penetration = float(entry["penetration"])
+        lines.append(
+            f"{label_a} attachment {attach_a} <> {label_b} attachment {attach_b} "
+            f"(penetration {penetration:.4f} m)"
+        )
 
     return summaries, lines
 
 
-def _collect_pybullet_contacts(client: BulletClient, runtimes: Sequence[RobotRuntime]) -> Tuple[Set[str], List[str]]:
+def _collect_pybullet_contacts(
+    client: BulletClient,
+    runtimes: Sequence[RobotRuntime],
+) -> Tuple[Set[str], List[str]]:
     summaries: Set[str] = set()
     lines: List[str] = []
 
@@ -353,6 +798,48 @@ def _collect_pybullet_contacts(client: BulletClient, runtimes: Sequence[RobotRun
                     f"{label_a} {name_a} <> {label_b} {name_b} (distance {distance:.4f} m)"
                 )
 
+    body_to_runtime = {runtime.body_id: runtime for runtime in runtimes}
+    attachment_to_runtime = {
+        runtime.attachment_body: runtime for runtime in runtimes if runtime.attachment_body is not None
+    }
+
+    for runtime in runtimes:
+        if runtime.attachment_body is None:
+            continue
+
+        attachment_label = f"{runtime.spec.label} attachment"
+        for contact in client.getContactPoints(bodyA=runtime.attachment_body):
+            target_body = int(contact[1])
+            if target_body == runtime.attachment_body:
+                continue
+
+            distance = float(contact[8])
+            link_b = int(contact[4])
+
+            if target_body in body_to_runtime:
+                other_runtime = body_to_runtime[target_body]
+                key = f"attach|{runtime.spec.label}|{other_runtime.spec.label}|{link_b}"
+                if key in summaries:
+                    continue
+                summaries.add(key)
+                name_b = other_runtime.link_names.get(link_b, f"link{link_b}")
+                lines.append(
+                    f"{attachment_label} <> {other_runtime.spec.label} {name_b} (distance {distance:.4f} m)"
+                )
+            elif target_body in attachment_to_runtime:
+                other_runtime = attachment_to_runtime[target_body]
+                if other_runtime is runtime:
+                    continue
+                key = f"attach_attach|{runtime.spec.label}|{other_runtime.spec.label}"
+                if key in summaries:
+                    continue
+                summaries.add(key)
+                lines.append(
+                    f"{attachment_label} <> {other_runtime.spec.label} attachment (distance {distance:.4f} m)"
+                )
+            else:
+                continue
+
     return summaries, lines
 
 
@@ -390,13 +877,8 @@ def _randomize_and_compare(
             for joint_index, value in zip(runtime.joint_indices, draws):
                 client.resetJointState(runtime.body_id, joint_index, value)
 
-            states.append(
-                {
-                    "robot": runtime.spec.name,
-                    "configuration": draws,
-                    "transform": runtime.spec.transform.astype(np.float32),
-                }
-            )
+            state = _build_state(runtime, client)
+            states.append(state)
 
         try:
             vamp_result = vamp.fkcc_multi_all(states, env)
@@ -409,7 +891,7 @@ def _randomize_and_compare(
 
         client.performCollisionDetection()
         pb_summary, pb_lines = _collect_pybullet_contacts(client, runtimes)
-        vamp_summary, vamp_lines = _compute_vamp_contacts(runtimes, env)
+        vamp_summary, vamp_lines = _compute_vamp_contacts(runtimes, env, states)
 
         pb_collision = len(pb_summary) > 0
         summary = (
@@ -450,12 +932,16 @@ def _randomize_and_compare(
         runtime.configuration[:] = baseline
         for joint_index, value in zip(runtime.joint_indices, baseline):
             client.resetJointState(runtime.body_id, joint_index, float(value))
+        if runtime.attachment is not None and runtime.attachment_transform is not None:
+            ee_tf = runtime.module.eefk(runtime.configuration.tolist())
+            _update_attachment_pose(client, runtime, ee_tf)
 
 def _place_obstacles(
     client: BulletClient,
     env: vamp.Environment,
-    obstacles: Sequence[ObstacleSpec]
-) -> None:
+    obstacles: Sequence[ObstacleSpec],
+) -> List[int]:
+    body_ids: List[int] = []
     for obstacle in obstacles:
         if obstacle.kind != "cube":
             continue
@@ -464,20 +950,21 @@ def _place_obstacles(
         collision = client.createCollisionShape(
             pb.GEOM_BOX, halfExtents=half_extents.tolist()
         )
+        rgba = list(obstacle.color) if obstacle.color is not None else [0.7, 0.7, 0.7, 0.4]
         visual = client.createVisualShape(
             pb.GEOM_BOX,
             halfExtents=half_extents.tolist(),
-            rgbaColor=[0.7, 0.7, 0.7, 0.4],
+            rgbaColor=rgba,
         )
-        client.createMultiBody(
+        body_id = client.createMultiBody(
             baseMass=0.0,
             baseCollisionShapeIndex=collision,
             baseVisualShapeIndex=visual,
             basePosition=obstacle.position.tolist(),
         )
+        body_ids.append(body_id)
 
-        env.add_cuboid(
-            vamp.Cuboid(
+        cube = vamp.Cuboid(
                 [float(obstacle.position[0]),
                 float(obstacle.position[1]),
                 float(obstacle.position[2])],
@@ -486,8 +973,11 @@ def _place_obstacles(
                 float(half_extents[1]),
                 float(half_extents[2])],
             )
-        )
+        if obstacle.name:
+            cube.name = obstacle.name
+        env.add_cuboid(cube)
 
+    return body_ids
 
 
 def _unique_paths(paths: Iterable[Path]) -> List[str]:
@@ -573,6 +1063,7 @@ def _load_robot(
     search_paths: Sequence[str],
     ignore_visuals: bool,
     initial_configuration: Optional[Sequence[float]] = None,
+    attachment_spec: Optional[AttachmentSpec] = None,
 ) -> RobotRuntime:
     for path in search_paths:
         client.setAdditionalSearchPath(path)
@@ -628,7 +1119,7 @@ def _load_robot(
 
     module = getattr(vamp, spec.name)
 
-    return RobotRuntime(
+    runtime = RobotRuntime(
         spec=spec,
         module=module,
         body_id=body_id,
@@ -639,6 +1130,43 @@ def _load_robot(
         configuration=configuration,
         joint_limits=limits,
     )
+
+    if attachment_spec is not None:
+        attachment = attachment_spec.build_attachment()
+        relative_tf = attachment_spec.relative_transform()
+        body = _create_attachment_body(client, attachment_spec, attachment)
+
+        runtime.attachment = attachment
+        runtime.attachment_transform = relative_tf
+        runtime.attachment_body = body
+        runtime.attachment_color = attachment_spec.color
+
+        ee_tf = module.eefk(runtime.configuration.tolist())
+        _update_attachment_pose(client, runtime, ee_tf)
+
+        disabled_links: Set[int] = set()
+        disabled_names = set(ATTACHMENT_COLLISION_EXCLUDES.get(spec.name, set()))
+
+        ee_name: Optional[str] = None
+        if hasattr(module, "end_effector"):
+            try:
+                ee_name = module.end_effector()
+            except TypeError:
+                ee_name = getattr(module, "end_effector", None)
+
+        if ee_name:
+            disabled_names.add(str(ee_name))
+
+        for link_index, link_name in link_names.items():
+            if link_name in disabled_names:
+                disabled_links.add(link_index)
+
+        num_joints = client.getNumJoints(runtime.body_id)
+        for link_index in range(-1, num_joints):
+            enable = 0 if link_index in disabled_links else 1
+            client.setCollisionFilterPair(runtime.body_id, body, link_index, -1, enableCollision=enable)
+
+    return runtime
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -694,6 +1222,11 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="cube@x,y,z@lx,ly,lz",
         help="Add an axis-aligned cuboid obstacle at the given center with edge lengths (meters).",
     )
+    parser.add_argument(
+        "--preset",
+        choices=sorted(PRESETS.keys()),
+        help="Load a predefined multi-robot scenario (robots, attachments, obstacles).",
+    )
     return parser
 
 
@@ -705,14 +1238,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    specs_raw = args.robots or ["panda", "panda@0.75,0,0"]
+    specs_raw = list(args.robots) if args.robots else []
+    attachment_map: Dict[str, AttachmentSpec] = {}
+    obstacle_specs: List[ObstacleSpec] = []
+
+    if args.preset:
+        preset = PRESETS[args.preset]
+        specs_raw = preset.robot_specs + specs_raw
+        attachment_map.update(preset.attachments)
+        for obstacle in preset.obstacles:
+            obstacle_specs.append(
+                ObstacleSpec(
+                    kind=obstacle.kind,
+                    position=obstacle.position.copy(),
+                    size=obstacle.size.copy(),
+                    color=list(obstacle.color) if obstacle.color is not None else None,
+                )
+            )
+
+    if not specs_raw:
+        specs_raw = ["panda", "panda@0.75,0,0"]
     specs = [parse_robot_spec(raw) for raw in specs_raw]
 
     for spec in specs:
         if spec.name not in vamp.robots:
             raise SystemExit(f"Robot '{spec.name}' is not available. Known robots: {', '.join(vamp.robots)}")
 
-    obstacle_specs: List[ObstacleSpec] = []
     if args.obstacles:
         for raw in args.obstacles:
             try:
@@ -765,6 +1316,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             per_robot_paths,
             args.ignore_visuals,
             initial_configuration=initial_state,
+            attachment_spec=attachment_map.get(spec.label),
         )
         runtimes.append(runtime)
         if initial_state is not None:
@@ -782,7 +1334,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     last_vamp_summary: Set[str] = set()
 
     if args.randomize:
-        _randomize_and_compare(client, runtimes, env, args.randomize, args.random_seed, baseline_configs)
+        _randomize_and_compare(
+            client,
+            runtimes,
+            env,
+            args.randomize,
+            args.random_seed,
+            baseline_configs,
+        )
         last_pb_summary.clear()
         last_vamp_summary.clear()
     else:
@@ -795,12 +1354,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         runtime.configuration[idx] = value
                         client.resetJointState(runtime.body_id, joint_index, value)
 
-                    state = {
-                        "robot": runtime.spec.name,
-                        "configuration": runtime.configuration.tolist(),
-                        "transform": runtime.spec.transform.astype(np.float32),
-                    }
-                    states.append(state)
+                    states.append(_build_state(runtime, client))
 
                 try:
                     ts = time.time()
@@ -814,12 +1368,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     text = "Collision Free" if collision_free else "In Collision"
                     color = _status_color(collision_free)
 
+                client.performCollisionDetection()
+
                 pb_summary: Optional[Set[str]] = None
                 vamp_summary: Optional[Set[str]] = None
                 if args.show_collisions:
-                    client.performCollisionDetection()
                     pb_summary, pb_lines = _collect_pybullet_contacts(client, runtimes)
-                    vamp_summary, vamp_lines = _compute_vamp_contacts(runtimes, env)
+                    vamp_summary, vamp_lines = _compute_vamp_contacts(runtimes, env, states)
 
                     if pb_summary != last_pb_summary or vamp_summary != last_vamp_summary:
                         if pb_summary:
