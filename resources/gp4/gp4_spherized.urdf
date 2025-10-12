@@ -441,7 +441,7 @@
 		<child link="link_3"></child>
 		<origin xyz="0 0 0.260" rpy="0 0 0"></origin>
 		<axis xyz="0 -1 0"></axis>
-		<limit effort="200" lower="-1.1344640137963142" upper="3.490658503988659" velocity="2"></limit>
+		<limit effort="200" lower="-0.99" upper="3.30" velocity="2"></limit>
 	</joint>
 	<joint name="joint_4" type="revolute">
 		<parent link="link_3"></parent>
@@ -478,5 +478,7 @@
 		<origin rpy="0 0 3.141592653589793" xyz="0 0 0.02525"></origin>
 		<parent link="fts"></parent>
 		<child link="link_tool"></child>
+		<!-- <axis xyz="0 0 1"></axis>
+		<limit velocity="0" effort="0" lower="0" upper="0"></limit> -->
 	</joint>
 </robot>

@@ -579,6 +579,16 @@ namespace vamp::collision
             {
                 ::operator delete[](allocated_ptr, alignment);
             }
+
+            constexpr auto operator==(const AlignedAllocator &) const noexcept -> bool
+            {
+                return true;
+            }
+
+            constexpr auto operator!=(const AlignedAllocator &) const noexcept -> bool
+            {
+                return false;
+            }
         };
 
         // The test buffer for this tree.

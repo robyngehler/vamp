@@ -2,6 +2,7 @@
 
 #include <string>
 #include <memory>
+#include <type_traits>
 
 #include <vamp/vector.hh>
 #include <vamp/collision/math.hh>
@@ -10,6 +11,43 @@
 
 namespace vamp::collision
 {
+    namespace detail
+    {
+        template <typename TargetT, typename SourceT>
+        inline constexpr auto cast_component(const SourceT &value) noexcept -> TargetT
+        {
+            if constexpr (std::is_same_v<TargetT, SourceT>)
+            {
+                return value;
+            }
+            else if constexpr (vamp::is_vector<SourceT>::value && not vamp::is_vector<TargetT>::value)
+            {
+                return static_cast<TargetT>(value[{0, 0}]);
+            }
+            else if constexpr (vamp::is_vector<TargetT>::value && not vamp::is_vector<SourceT>::value)
+            {
+                using ScalarT = typename TargetT::S::ScalarT;
+                return TargetT(static_cast<ScalarT>(value));
+            }
+            else if constexpr (vamp::is_vector<TargetT>::value && vamp::is_vector<SourceT>::value)
+            {
+                if constexpr (std::is_convertible_v<SourceT, TargetT>)
+                {
+                    return static_cast<TargetT>(value);
+                }
+                else
+                {
+                    using ScalarT = typename TargetT::S::ScalarT;
+                    return TargetT(static_cast<ScalarT>(value[{0, 0}]));
+                }
+            }
+            else
+            {
+                return static_cast<TargetT>(value);
+            }
+        }
+    }  // namespace detail
+
     template <typename DataT>
     struct Shape
     {
@@ -19,7 +57,9 @@ namespace vamp::collision
         Shape() = default;
 
         template <typename OtherDataT>
-        explicit Shape(const Shape<OtherDataT> &other) : name(other.name), min_distance(other.min_distance)
+        explicit Shape(const Shape<OtherDataT> &other)
+          : name(other.name)
+          , min_distance(detail::cast_component<DataT>(other.min_distance))
         {
         }
     };
@@ -107,21 +147,21 @@ namespace vamp::collision
         template <typename OtherDataT>
         explicit Cuboid(const Cuboid<OtherDataT> &other)
           : Shape<DataT>(other)
-          , x(other.x)
-          , y(other.y)
-          , z(other.z)
-          , axis_1_x(other.axis_1_x)
-          , axis_1_y(other.axis_1_y)
-          , axis_1_z(other.axis_1_z)
-          , axis_2_x(other.axis_2_x)
-          , axis_2_y(other.axis_2_y)
-          , axis_2_z(other.axis_2_z)
-          , axis_3_x(other.axis_3_x)
-          , axis_3_y(other.axis_3_y)
-          , axis_3_z(other.axis_3_z)
-          , axis_1_r(other.axis_1_r)
-          , axis_2_r(other.axis_2_r)
-          , axis_3_r(other.axis_3_r)
+          , x(detail::cast_component<DataT>(other.x))
+          , y(detail::cast_component<DataT>(other.y))
+          , z(detail::cast_component<DataT>(other.z))
+          , axis_1_x(detail::cast_component<DataT>(other.axis_1_x))
+          , axis_1_y(detail::cast_component<DataT>(other.axis_1_y))
+          , axis_1_z(detail::cast_component<DataT>(other.axis_1_z))
+          , axis_2_x(detail::cast_component<DataT>(other.axis_2_x))
+          , axis_2_y(detail::cast_component<DataT>(other.axis_2_y))
+          , axis_2_z(detail::cast_component<DataT>(other.axis_2_z))
+          , axis_3_x(detail::cast_component<DataT>(other.axis_3_x))
+          , axis_3_y(detail::cast_component<DataT>(other.axis_3_y))
+          , axis_3_z(detail::cast_component<DataT>(other.axis_3_z))
+          , axis_1_r(detail::cast_component<DataT>(other.axis_1_r))
+          , axis_2_r(detail::cast_component<DataT>(other.axis_2_r))
+          , axis_3_r(detail::cast_component<DataT>(other.axis_3_r))
         {
         }
     };
@@ -207,14 +247,14 @@ namespace vamp::collision
         template <typename OtherDataT>
         explicit Cylinder(const Cylinder<OtherDataT> &other)
           : Shape<DataT>(other)
-          , x1(other.x1)
-          , y1(other.y1)
-          , z1(other.z1)
-          , xv(other.xv)
-          , yv(other.yv)
-          , zv(other.zv)
-          , r(other.r)
-          , rdv(other.rdv)
+          , x1(detail::cast_component<DataT>(other.x1))
+          , y1(detail::cast_component<DataT>(other.y1))
+          , z1(detail::cast_component<DataT>(other.z1))
+          , xv(detail::cast_component<DataT>(other.xv))
+          , yv(detail::cast_component<DataT>(other.yv))
+          , zv(detail::cast_component<DataT>(other.zv))
+          , r(detail::cast_component<DataT>(other.r))
+          , rdv(detail::cast_component<DataT>(other.rdv))
         {
         }
     };
@@ -240,7 +280,11 @@ namespace vamp::collision
 
         template <typename OtherDataT>
         explicit Sphere(const Sphere<OtherDataT> &other)
-          : Shape<DataT>(other), x(other.x), y(other.y), z(other.z), r(other.r)
+          : Shape<DataT>(other)
+          , x(detail::cast_component<DataT>(other.x))
+          , y(detail::cast_component<DataT>(other.y))
+          , z(detail::cast_component<DataT>(other.z))
+          , r(detail::cast_component<DataT>(other.r))
         {
         }
     };
@@ -296,12 +340,12 @@ namespace vamp::collision
         template <typename OtherDataT>
         explicit HeightField(const HeightField<OtherDataT> &other)
           : Shape<DataT>(other)
-          , x(other.x)
-          , y(other.y)
-          , z(other.z)
-          , xs(other.xs)
-          , ys(other.ys)
-          , zs(other.zs)
+          , x(detail::cast_component<DataT>(other.x))
+          , y(detail::cast_component<DataT>(other.y))
+          , z(detail::cast_component<DataT>(other.z))
+          , xs(detail::cast_component<DataT>(other.xs))
+          , ys(detail::cast_component<DataT>(other.ys))
+          , zs(detail::cast_component<DataT>(other.zs))
           , xd(other.xd)
           , yd(other.yd)
           , xd2(other.xd2)

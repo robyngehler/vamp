@@ -461,7 +461,7 @@
 		</inertial>
 	<visual name="fts_visual_1">
 			<geometry>
-				<sphere radius="0.043157" />
+				<sphere radius="0.058" />
 			</geometry>
 			<origin xyz="0.0 0.0 0.0" rpy="0 0 0" />
 		</visual>
@@ -694,7 +694,7 @@
 		<child link="link_3" />
 		<origin xyz="0 0 0.260" rpy="0 0 0" />
 		<axis xyz="0 -1 0" />
-		<limit effort="200" lower="-1.1344640137963142" upper="3.490658503988659" velocity="2" />
+		<limit effort="200" lower="-0.99" upper="3.30" velocity="2" />
 	</joint>
 	<joint name="joint_4" type="revolute">
 		<parent link="link_3" />
@@ -708,7 +708,7 @@
 		<child link="link_5" />
 		<origin xyz="0 0 0" rpy="0 0 0" />
 		<axis xyz="0 -1 0" />
-		<limit effort="200" lower="-1.98968" upper="1.98968" velocity="2"></limit>
+		<limit effort="200" lower="-1.98968" upper="1.98968" velocity="2" />
 	</joint>
 	<joint name="joint_6" type="revolute">
 		<parent link="link_5" />
@@ -731,5 +731,6 @@
 		<origin rpy="0 0 3.141592653589793" xyz="0 0 0.02525" />
 		<parent link="fts" />
 		<child link="link_tool" />
+		
 	</joint>
 </robot>

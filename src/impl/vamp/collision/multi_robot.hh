@@ -260,6 +260,8 @@ namespace vamp::collision
                 sphere.x = point.x();
                 sphere.y = point.y();
                 sphere.z = point.z();
+                const float distance = point.norm();
+                sphere.min_distance = distance - sphere.r;
             }
 
             auto transform_segment = [&](auto &segment) noexcept
@@ -282,14 +284,17 @@ namespace vamp::collision
             for (auto &capsule : environment.capsules)
             {
                 transform_segment(capsule);
+                capsule.min_distance = capsule.compute_min_distance();
             }
             for (auto &capsule : environment.z_aligned_capsules)
             {
                 transform_segment(capsule);
+                capsule.min_distance = capsule.compute_min_distance();
             }
             for (auto &cylinder : environment.cylinders)
             {
                 transform_segment(cylinder);
+                cylinder.min_distance = cylinder.compute_min_distance();
             }
 
             auto transform_cuboid = [&](auto &cuboid) noexcept
@@ -318,11 +323,57 @@ namespace vamp::collision
             for (auto &cuboid : environment.cuboids)
             {
                 transform_cuboid(cuboid);
+                cuboid.min_distance = cuboid.compute_min_distance();
             }
             for (auto &cuboid : environment.z_aligned_cuboids)
             {
                 transform_cuboid(cuboid);
+                cuboid.min_distance = cuboid.compute_min_distance();
             }
+
+            environment.sort();
+        }
+
+        template <std::size_t rake>
+        struct EnvironmentTransformCache
+        {
+            struct Entry
+            {
+                Eigen::Isometry3f transform;
+                collision::Environment<FloatVector<rake>> environment;
+            };
+
+            inline static thread_local std::vector<Entry> storage{};
+        };
+
+        template <std::size_t rake>
+        inline auto environment_entry_for_transform(
+            const collision::Environment<FloatVector<rake>> &source_environment,
+            const Eigen::Isometry3f &base_transform)
+            -> typename EnvironmentTransformCache<rake>::Entry &
+        {
+            auto &storage = EnvironmentTransformCache<rake>::storage;
+            for (auto &entry : storage)
+            {
+                if (entry.transform.linear().isApprox(base_transform.linear(), 1e-6F) &&
+                    entry.transform.translation().isApprox(base_transform.translation(), 1e-6F))
+                {
+                    return entry;
+                }
+            }
+
+            collision::Environment<FloatVector<rake>> transformed =
+                is_identity_transform(base_transform) ?
+                    collision::Environment<FloatVector<rake>>(source_environment) :
+                    [&]
+                    {
+                        collision::Environment<float> float_environment(source_environment);
+                        transform_environment_to_robot_frame(float_environment, base_transform);
+                        return collision::Environment<FloatVector<rake>>(float_environment);
+                    }();
+
+            storage.push_back({base_transform, std::move(transformed)});
+            return storage.back();
         }
 
         template <typename Robot, std::size_t rake>
@@ -342,17 +393,11 @@ namespace vamp::collision
         {
             using Robot = typename RobotStateT::RobotType;
 
-            collision::Environment<FloatVector<rake>> robot_environment;
-            if (detail::is_identity_transform(state.base_transform))
-            {
-                robot_environment = source_environment;
-            }
-            else
-            {
-                collision::Environment<float> float_environment(source_environment);
-                detail::transform_environment_to_robot_frame(float_environment, state.base_transform);
-                robot_environment = collision::Environment<FloatVector<rake>>(float_environment);
-            }
+            auto &entry = detail::environment_entry_for_transform<rake>(
+                source_environment, state.base_transform);
+            auto &robot_environment = entry.environment;
+
+            auto saved_attachments = robot_environment.attachments;
 
             if (state.attachment)
             {
@@ -371,6 +416,7 @@ namespace vamp::collision
             {
                 if (filter == nullptr)
                 {
+                    robot_environment.attachments = std::move(saved_attachments);
                     return false;
                 }
 
@@ -380,6 +426,7 @@ namespace vamp::collision
                         state.configuration,
                         state.attachment != nullptr))
                 {
+                    robot_environment.attachments = std::move(saved_attachments);
                     return false;
                 }
 
@@ -395,6 +442,8 @@ namespace vamp::collision
                 attachment_spheres = robot_environment.attachments->posed_spheres;
                 apply_transform<rake>(attachment_spheres, state.base_transform);
             }
+
+            robot_environment.attachments = std::move(saved_attachments);
 
             return true;
         }
@@ -420,6 +469,7 @@ namespace vamp::collision
 
             if (not valid)
             {
+                // fkcc_multi_* returns false when any SIMD lane detects a collision.
                 return false;
             }
 
@@ -442,6 +492,9 @@ namespace vamp::collision
             constexpr std::size_t count_a = std::remove_reference_t<decltype(a.x)>::num_rows;
             constexpr std::size_t count_b = std::remove_reference_t<decltype(b.x)>::num_rows;
 
+            // Each coordinate component is a FloatVector<rake>, so every arithmetic
+            // operation below runs across all SIMD lanes in lockstep. The outer loops
+            // are only over the small, fixed set of robot spheres.
             for (std::size_t i = 0; i < count_a; ++i)
             {
                 const auto ax = a.x[i];
@@ -541,6 +594,8 @@ namespace vamp::collision
             }
             else
             {
+                // Compare the I-th and J-th robots; the FloatVector math inside
+                // the check stays vectorized across rake lanes.
                 if (spheres_collide(std::get<I>(spheres), std::get<J>(spheres)))
                 {
                     return true;
@@ -559,6 +614,8 @@ namespace vamp::collision
             }
             else
             {
+                // Start at robot I and walk forward so that every unique pair is
+                // tested exactly once; compile-time recursion keeps the loops tight.
                 if (spheres_cross_pair<I, I + 1>(spheres))
                 {
                     return true;
@@ -788,9 +845,12 @@ namespace vamp::collision
 
             if (not valid)
             {
+                // fkcc_multi_self returns false when any SIMD lane collides.
                 return false;
             }
 
+            // Kick off the recursive robot/robot sphere sweep starting at tuple index 0.
+            // Same pairwise robot sweep as above, but on the self-checked robot set.
             if (spheres_cross<0>(spheres))
             {
                 return false;
@@ -843,6 +903,7 @@ namespace vamp::collision
                 return false;
             }
 
+            // Same pairwise robot sweep as above, but on the self-checked robot set.
             if (spheres_cross<0>(spheres))
             {
                 return false;

@@ -152,6 +152,14 @@ class PresetConfig:
     obstacles: List[ObstacleSpec]
 
 PRESETS: Dict[str, PresetConfig] = {
+    "dual_gp4": PresetConfig(
+        robot_specs=[
+            "left_arm=gp4@0,0.0,0.0@0.0,0.0,0.0",
+            "right_arm=gp4@0.88128092,-0.01226491,0.0@0.0,0.0,3.13792336",
+        ],
+        attachments={},
+        obstacles=[],
+    ), 
     "panda_two_rod": PresetConfig(
         robot_specs=[
             "panda0=panda@0.4,0.0,0.1@0.0,0.0,-3.141592653589793",
@@ -160,7 +168,7 @@ PRESETS: Dict[str, PresetConfig] = {
         attachments={
             "panda0": AttachmentSpec(
                 kind="cylinder",
-                translation=[0.0, 0.0, -0.0466],
+                translation=[0.0, 0.0, -0.005],
                 rotation_rpy=[0.0, 1.5707963267948966, 0.0],
                 length=0.5,
                 radius=0.015,
@@ -169,7 +177,7 @@ PRESETS: Dict[str, PresetConfig] = {
             ),
             "panda1": AttachmentSpec(
                 kind="cylinder",
-                translation=[0.0, 0.0, -0.0466],
+                translation=[0.0, 0.0, -0.005],
                 rotation_rpy=[0.0, 1.5707963267948966, 0.0],
                 length=0.5,
                 radius=0.015,
@@ -307,7 +315,7 @@ PRESETS: Dict[str, PresetConfig] = {
         attachments={
             "panda0": AttachmentSpec(
                 kind="cylinder",
-                translation=[0.0, 0.0, 0.0],
+                translation=[0.0, 0.0, -0.005],
                 rotation_rpy=[0.0, 1.5707963267948966, 0.0],
                 length=0.3,
                 radius=0.01,
@@ -316,7 +324,7 @@ PRESETS: Dict[str, PresetConfig] = {
             ),
             "panda1": AttachmentSpec(
                 kind="cylinder",
-                translation=[0.0, 0.0, 0.0],
+                translation=[0.0, 0.0, -0.005],
                 rotation_rpy=[0.0, 1.5707963267948966, 0.0],
                 length=0.3,
                 radius=0.01,
@@ -325,7 +333,7 @@ PRESETS: Dict[str, PresetConfig] = {
             ),
             "panda2": AttachmentSpec(
                 kind="cylinder",
-                translation=[0.0, 0.0, 0.0],
+                translation=[0.0, 0.0, -0.005],
                 rotation_rpy=[0.0, 1.5707963267948966, 0.0],
                 length=0.3,
                 radius=0.01,
@@ -334,7 +342,7 @@ PRESETS: Dict[str, PresetConfig] = {
             ),
             "panda3": AttachmentSpec(
                 kind="cylinder",
-                translation=[0.0, 0.0, 0.0],
+                translation=[0.0, 0.0, -0.005],
                 rotation_rpy=[0.0, 1.5707963267948966, 0.0],
                 length=0.3,
                 radius=0.01,

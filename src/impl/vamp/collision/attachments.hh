@@ -20,14 +20,25 @@ namespace vamp::collision
 
         template <typename DT = DataT, typename = std::enable_if_t<not std::is_same_v<DT, float>>>
         Attachment(const Eigen::Transform<float, 3, Eigen::Isometry> &tf) noexcept
-          : Attachment(tf.cast<DataT>())
+          : Attachment(convert_transform<float>(tf))
         {
         }
 
         Attachment(const Attachment &) = default;
 
         template <typename DT = DataT, typename = std::enable_if_t<not std::is_same_v<DT, float>>>
-        Attachment(const Attachment<float> &o) noexcept : Attachment(o.tf)
+        Attachment(const Attachment<float> &o) noexcept : Attachment(convert_transform<float>(o.tf))
+        {
+            spheres.reserve(o.spheres.size());
+            for (const auto &sphere : o.spheres)
+            {
+                spheres.emplace_back(sphere);
+            }
+        }
+
+        template <typename OtherDataT,
+                  typename = std::enable_if_t<std::is_same_v<DataT, float> && not std::is_same_v<OtherDataT, DataT>>>
+        Attachment(const Attachment<OtherDataT> &o) noexcept : Attachment(convert_transform<OtherDataT>(o.tf))
         {
             spheres.reserve(o.spheres.size());
             for (const auto &sphere : o.spheres)
@@ -183,6 +194,25 @@ namespace vamp::collision
                 const Eigen::Vector3f position = center + dir * offset;
                 spheres.emplace_back(position.x(), position.y(), position.z(), radius);
             }
+        }
+
+        template <typename FromDataT>
+        static auto convert_transform(const Eigen::Transform<FromDataT, 3, Eigen::Isometry> &input) noexcept
+            -> Eigen::Transform<DataT, 3, Eigen::Isometry>
+        {
+            Eigen::Transform<DataT, 3, Eigen::Isometry> output;
+            const auto &in_matrix = input.matrix();
+            auto &out_matrix = output.matrix();
+
+            for (int row = 0; row < 4; ++row)
+            {
+                for (int col = 0; col < 4; ++col)
+                {
+                    out_matrix(row, col) = detail::cast_component<DataT>(in_matrix(row, col));
+                }
+            }
+
+            return output;
         }
     };
 }  // namespace vamp::collision
