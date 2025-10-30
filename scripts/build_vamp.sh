@@ -17,10 +17,7 @@ if ! command -v "$CMAKE_BIN" >/dev/null 2>&1; then
   exit 1
 fi
 
-DEFAULT_EIGEN_PREFIX="$ROOT_DIR/../eigen-install"
-if [ -d "$ROOT_DIR/third_party/eigen-install" ]; then
-  DEFAULT_EIGEN_PREFIX="$ROOT_DIR/third_party/eigen-install"
-fi
+DEFAULT_EIGEN_PREFIX="/usr/local"
 EIGEN_PREFIX=${EIGEN_PREFIX:-"$DEFAULT_EIGEN_PREFIX"}
 PYTHON_BIN=${PYTHON_BIN:-"/usr/bin/python3"}
 
@@ -29,7 +26,7 @@ BUILD_CPP_DIR=${BUILD_CPP_DIR:-"build-release"}
 
 
 build_python_targets() {
-  python3 -m pip install --no-build-isolation -v --config-settings=cmake.define.CMAKE_PREFIX_PATH=/home/philip/Code/eigen-install .
+  python3 -m pip install --no-build-isolation -v --config-settings=cmake.define.CMAKE_PREFIX_PATH=/usr/local .
 }
 
 configure_cpp_build() {

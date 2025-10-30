@@ -38,11 +38,10 @@ namespace vamp::robots
             "link_6",
             "fts",
             "link_tool"};
-        inline static constexpr std::array<std::uint16_t, 50> sphere_to_link = {
-            0, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-            2, 2, 3, 4, 4, 4, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6,
-            6, 7, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
-            8, 8};
+        inline static constexpr std::array<std::uint16_t, 65> sphere_to_link = {
+            0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+            2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7, 
+            8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8};
 
         static_assert(GP4::n_spheres == sphere_to_link.size(), "GP4 sphere mapping mismatch");
     };
