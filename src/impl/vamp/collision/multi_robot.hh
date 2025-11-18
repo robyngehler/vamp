@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -227,6 +228,82 @@ namespace vamp::collision
                 sphere.y = x * ry0 + y * ry1 + z * ry2 + translation.y();
                 sphere.z = x * rz0 + y * rz1 + z * rz2 + translation.z();
             }
+        }
+
+        template <typename RowVectorT>
+        inline auto rotate_row_left(RowVectorT &row) noexcept -> void
+        {
+            if constexpr (RowVectorT::num_scalars <= 1)
+            {
+                return;
+            }
+
+            const auto values = row.to_array();
+            using Scalar = typename RowVectorT::S::ScalarT;
+            std::array<Scalar, RowVectorT::num_scalars> rotated{};
+            std::copy_n(values.begin(), RowVectorT::num_scalars, rotated.begin());
+            std::rotate(rotated.begin(), rotated.begin() + 1, rotated.end());
+            row = RowVectorT(rotated);
+        }
+
+        template <typename VectorT>
+        inline auto rotate_vector_rows_left(VectorT &vector) noexcept -> void
+        {
+            if constexpr (VectorT::num_rows == 0)
+            {
+                return;
+            }
+            else
+            {
+                [&]<std::size_t... I>(std::index_sequence<I...>)
+                {
+                    (..., rotate_row_left(vector.row(I)));
+                }(std::make_index_sequence<VectorT::num_rows>{});
+            }
+        }
+
+        template <typename SpheresT>
+        inline auto rotate_robot_spheres_left(SpheresT &spheres) noexcept -> void
+        {
+            rotate_vector_rows_left(spheres.x);
+            rotate_vector_rows_left(spheres.y);
+            rotate_vector_rows_left(spheres.z);
+            rotate_vector_rows_left(spheres.r);
+        }
+
+        template <std::size_t rake>
+        inline auto rotate_attachment_spheres_left(
+            std::vector<collision::Sphere<FloatVector<rake>>> &attachments) noexcept -> void
+        {
+            for (auto &sphere : attachments)
+            {
+                rotate_vector_rows_left(sphere.x);
+                rotate_vector_rows_left(sphere.y);
+                rotate_vector_rows_left(sphere.z);
+                rotate_vector_rows_left(sphere.r);
+            }
+        }
+
+        template <std::size_t rake, typename TestFn, typename RotateFn>
+        inline auto run_lane_shifts(TestFn &&test, RotateFn &&rotate) noexcept -> bool
+        {
+            for (std::size_t shift = 0; shift < rake; ++shift)
+            {
+                if (test())
+                {
+                    return true;
+                }
+
+                if constexpr (rake > 1)
+                {
+                    if (shift + 1 < rake)
+                    {
+                        rotate();
+                    }
+                }
+            }
+
+            return false;
         }
 
         inline auto is_identity_transform(const Eigen::Isometry3f &tf) noexcept -> bool
@@ -581,8 +658,70 @@ namespace vamp::collision
             return false;
         }
 
-        template <std::size_t I, std::size_t J, typename Tuple>
-        inline auto spheres_cross_pair(const Tuple &spheres) noexcept -> bool
+        template <std::size_t rake, bool cross, typename SpheresA, typename SpheresB>
+        inline auto spheres_collide_variant(const SpheresA &a, const SpheresB &b) noexcept -> bool
+        {
+            if constexpr (not cross)
+            {
+                return spheres_collide(a, b);
+            }
+            else
+            {
+                auto rotated = b;
+                return run_lane_shifts<rake>(
+                    [&]() { return spheres_collide(a, rotated); },
+                    [&]() { rotate_robot_spheres_left(rotated); });
+            }
+        }
+
+        template <std::size_t rake, bool cross, typename AttachmentVec, typename SpheresT>
+        inline auto attachments_vs_spheres_variant(
+            const AttachmentVec &attachments,
+            const SpheresT &spheres) noexcept -> bool
+        {
+            if (attachments.empty())
+            {
+                return false;
+            }
+
+            if constexpr (not cross)
+            {
+                return attachments_vs_spheres(attachments, spheres);
+            }
+            else
+            {
+                auto rotated = spheres;
+                return run_lane_shifts<rake>(
+                    [&]() { return attachments_vs_spheres(attachments, rotated); },
+                    [&]() { rotate_robot_spheres_left(rotated); });
+            }
+        }
+
+        template <std::size_t rake, bool cross, typename AttachmentVecA, typename AttachmentVecB>
+        inline auto attachments_vs_attachments_variant(
+            const AttachmentVecA &a,
+            const AttachmentVecB &b) noexcept -> bool
+        {
+            if (a.empty() || b.empty())
+            {
+                return false;
+            }
+
+            if constexpr (not cross)
+            {
+                return attachments_vs_attachments(a, b);
+            }
+            else
+            {
+                auto rotated = b;
+                return run_lane_shifts<rake>(
+                    [&]() { return attachments_vs_attachments(a, rotated); },
+                    [&]() { rotate_attachment_spheres_left<rake>(rotated); });
+            }
+        }
+
+        template <std::size_t rake, bool cross, std::size_t I, std::size_t J, typename Tuple>
+        inline auto spheres_cross_pair_variant(const Tuple &spheres) noexcept -> bool
         {
             if constexpr (I >= std::tuple_size_v<Tuple>)
             {
@@ -594,19 +733,17 @@ namespace vamp::collision
             }
             else
             {
-                // Compare the I-th and J-th robots; the FloatVector math inside
-                // the check stays vectorized across rake lanes.
-                if (spheres_collide(std::get<I>(spheres), std::get<J>(spheres)))
+                if (spheres_collide_variant<rake, cross>(std::get<I>(spheres), std::get<J>(spheres)))
                 {
                     return true;
                 }
 
-                return spheres_cross_pair<I, J + 1>(spheres);
+                return spheres_cross_pair_variant<rake, cross, I, J + 1>(spheres);
             }
         }
 
-        template <std::size_t I, typename Tuple>
-        inline auto spheres_cross(const Tuple &spheres) noexcept -> bool
+        template <std::size_t rake, bool cross, std::size_t I, typename Tuple>
+        inline auto spheres_cross_variant(const Tuple &spheres) noexcept -> bool
         {
             if constexpr (I >= std::tuple_size_v<Tuple>)
             {
@@ -614,19 +751,17 @@ namespace vamp::collision
             }
             else
             {
-                // Start at robot I and walk forward so that every unique pair is
-                // tested exactly once; compile-time recursion keeps the loops tight.
-                if (spheres_cross_pair<I, I + 1>(spheres))
+                if (spheres_cross_pair_variant<rake, cross, I, I + 1>(spheres))
                 {
                     return true;
                 }
 
-                return spheres_cross<I + 1>(spheres);
+                return spheres_cross_variant<rake, cross, I + 1>(spheres);
             }
         }
 
-        template <std::size_t I, std::size_t J, typename AttachTuple, typename SphereTuple>
-        inline auto attachments_vs_spheres_pair(
+        template <std::size_t rake, bool cross, std::size_t I, std::size_t J, typename AttachTuple, typename SphereTuple>
+        inline auto attachments_vs_spheres_pair_variant(
             const AttachTuple &attachments,
             const SphereTuple &spheres) noexcept -> bool
         {
@@ -638,18 +773,18 @@ namespace vamp::collision
             {
                 if constexpr (J != I)
                 {
-                    if (attachments_vs_spheres(std::get<I>(attachments), std::get<J>(spheres)))
+                    if (attachments_vs_spheres_variant<rake, cross>(std::get<I>(attachments), std::get<J>(spheres)))
                     {
                         return true;
                     }
                 }
 
-                return attachments_vs_spheres_pair<I, J + 1>(attachments, spheres);
+                return attachments_vs_spheres_pair_variant<rake, cross, I, J + 1>(attachments, spheres);
             }
         }
 
-        template <std::size_t I, typename AttachTuple, typename SphereTuple>
-        inline auto attachments_vs_spheres_all(
+        template <std::size_t rake, bool cross, std::size_t I, typename AttachTuple, typename SphereTuple>
+        inline auto attachments_vs_spheres_all_variant(
             const AttachTuple &attachments,
             const SphereTuple &spheres) noexcept -> bool
         {
@@ -659,17 +794,17 @@ namespace vamp::collision
             }
             else
             {
-                if (attachments_vs_spheres_pair<I, 0>(attachments, spheres))
+                if (attachments_vs_spheres_pair_variant<rake, cross, I, 0>(attachments, spheres))
                 {
                     return true;
                 }
 
-                return attachments_vs_spheres_all<I + 1>(attachments, spheres);
+                return attachments_vs_spheres_all_variant<rake, cross, I + 1>(attachments, spheres);
             }
         }
 
-        template <std::size_t I, std::size_t J, typename AttachTuple>
-        inline auto attachments_vs_attachments_pair(const AttachTuple &attachments) noexcept -> bool
+        template <std::size_t rake, bool cross, std::size_t I, std::size_t J, typename AttachTuple>
+        inline auto attachments_vs_attachments_pair_variant(const AttachTuple &attachments) noexcept -> bool
         {
             if constexpr (J >= std::tuple_size_v<AttachTuple>)
             {
@@ -679,18 +814,18 @@ namespace vamp::collision
             {
                 if constexpr (J > I)
                 {
-                    if (attachments_vs_attachments(std::get<I>(attachments), std::get<J>(attachments)))
+                    if (attachments_vs_attachments_variant<rake, cross>(std::get<I>(attachments), std::get<J>(attachments)))
                     {
                         return true;
                     }
                 }
 
-                return attachments_vs_attachments_pair<I, J + 1>(attachments);
+                return attachments_vs_attachments_pair_variant<rake, cross, I, J + 1>(attachments);
             }
         }
 
-        template <std::size_t I, typename AttachTuple>
-        inline auto attachments_vs_attachments_all(const AttachTuple &attachments) noexcept -> bool
+        template <std::size_t rake, bool cross, std::size_t I, typename AttachTuple>
+        inline auto attachments_vs_attachments_all_variant(const AttachTuple &attachments) noexcept -> bool
         {
             if constexpr (I >= std::tuple_size_v<AttachTuple>)
             {
@@ -698,12 +833,12 @@ namespace vamp::collision
             }
             else
             {
-                if (attachments_vs_attachments_pair<I, 0>(attachments))
+                if (attachments_vs_attachments_pair_variant<rake, cross, I, 0>(attachments))
                 {
                     return true;
                 }
 
-                return attachments_vs_attachments_all<I + 1>(attachments);
+                return attachments_vs_attachments_all_variant<rake, cross, I + 1>(attachments);
             }
         }
 
@@ -851,19 +986,19 @@ namespace vamp::collision
 
             // Kick off the recursive robot/robot sphere sweep starting at tuple index 0.
             // Same pairwise robot sweep as above, but on the self-checked robot set.
-            if (spheres_cross<0>(spheres))
+            if (spheres_cross_variant<rake, false, 0>(spheres))
             {
                 return false;
             }
 
             if (attachments_present(attachments))
             {
-                if (attachments_vs_spheres_all<0>(attachments, spheres))
+                if (attachments_vs_spheres_all_variant<rake, false, 0>(attachments, spheres))
                 {
                     return false;
                 }
 
-                if (attachments_vs_attachments_all<0>(attachments))
+                if (attachments_vs_attachments_all_variant<rake, false, 0>(attachments))
                 {
                     return false;
                 }
@@ -872,8 +1007,8 @@ namespace vamp::collision
             return true;
         }
 
-        template <std::size_t rake, typename... States>
-        inline auto fkcc_multi_self_attach_impl(const States &... states) noexcept -> bool
+        template <std::size_t rake, bool cross, typename... States>
+        inline auto fkcc_multi_self_attach_impl_dispatch(const States &... states) noexcept -> bool
         {
             static_assert(sizeof...(States) > 0, "fkcc_multi_self_attach requires at least one robot state");
 
@@ -903,26 +1038,37 @@ namespace vamp::collision
                 return false;
             }
 
-            // Same pairwise robot sweep as above, but on the self-checked robot set.
-            if (spheres_cross<0>(spheres))
+            if (spheres_cross_variant<rake, cross, 0>(spheres))
             {
                 return false;
             }
 
             if (attachments_present(attachments))
             {
-                if (attachments_vs_spheres_all<0>(attachments, spheres))
+                if (attachments_vs_spheres_all_variant<rake, cross, 0>(attachments, spheres))
                 {
                     return false;
                 }
 
-                if (attachments_vs_attachments_all<0>(attachments))
+                if (attachments_vs_attachments_all_variant<rake, cross, 0>(attachments))
                 {
                     return false;
                 }
             }
 
             return true;
+        }
+
+        template <std::size_t rake, typename... States>
+        inline auto fkcc_multi_self_attach_impl(const States &... states) noexcept -> bool
+        {
+            return fkcc_multi_self_attach_impl_dispatch<rake, false>(states...);
+        }
+
+        template <std::size_t rake, typename... States>
+        inline auto fkcc_multi_cross_attach_impl(const States &... states) noexcept -> bool
+        {
+            return fkcc_multi_self_attach_impl_dispatch<rake, true>(states...);
         }
     }  // namespace detail
 
@@ -970,5 +1116,17 @@ namespace vamp::collision
     inline auto fkcc_multi_self(const States &... states) noexcept -> bool
     {
         return detail::fkcc_multi_self_attach_impl<rake>(states...);
+    }
+
+    template <std::size_t rake, typename... States>
+    inline auto fkcc_multi_cross_attach(const States &... states) noexcept -> bool
+    {
+        return detail::fkcc_multi_cross_attach_impl<rake>(states...);
+    }
+
+    template <std::size_t rake, typename... States>
+    inline auto fkcc_multi_cross(const States &... states) noexcept -> bool
+    {
+        return detail::fkcc_multi_cross_attach_impl<rake>(states...);
     }
 }  // namespace vamp::collision
