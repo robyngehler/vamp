@@ -180,6 +180,13 @@ if(VAMP_BUILD_CPP_DEMO)
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(vamp_multi_robot_example PRIVATE -Wno-c++11-narrowing -Wno-sign-compare)
   endif()
+
+  add_executable(vamp_multi_robot_debug_example scripts/cpp/multi_robot_debug_example.cc)
+  target_link_libraries(vamp_multi_robot_debug_example PRIVATE vamp_cpp)
+
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(vamp_multi_robot_debug_example PRIVATE -Wno-c++11-narrowing -Wno-sign-compare)
+  endif()
 endif()
 
 # OMPL integration demo

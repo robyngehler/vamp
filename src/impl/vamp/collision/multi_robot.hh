@@ -18,6 +18,7 @@
 #include <vamp/collision/environment.hh>
 #include <vamp/collision/validity.hh>
 #include <vamp/collision/sphere_sphere.hh>
+#include <vamp/robots/link_mapping.hh>
 
 namespace vamp::collision
 {
@@ -165,8 +166,89 @@ namespace vamp::collision
         return {configuration, base_transform, attachment};
     }
 
+    struct DebugBody
+    {
+        std::size_t robot_index = 0;
+        std::size_t sphere_index = 0;
+        std::size_t link_index = 0;
+        bool is_attachment = false;
+        std::size_t attachment_index = 0;
+        std::string name;
+    };
+
+    struct DebugLinkLinkCollision
+    {
+        DebugBody first;
+        DebugBody second;
+    };
+
+    struct DebugLinkObjectCollision
+    {
+        DebugBody link;
+        std::string object;
+    };
+
+    struct DebugFkccMultiAllResult
+    {
+        std::vector<DebugLinkLinkCollision> link_link;
+        std::vector<DebugLinkObjectCollision> link_object;
+    };
+
     namespace detail
     {
+        template <typename Robot>
+        inline auto link_info_from_sphere(std::size_t sphere_index) -> std::pair<std::size_t, std::string>
+        {
+            std::size_t link_index = sphere_index;
+            std::string link_name;
+
+            if constexpr (vamp::robots::LinkMapping<Robot>::available)
+            {
+                const auto &mapping = vamp::robots::LinkMapping<Robot>::sphere_to_link;
+                if (sphere_index < mapping.size())
+                {
+                    link_index = mapping[sphere_index];
+                    const auto &names = vamp::robots::LinkMapping<Robot>::link_names;
+                    if (link_index < names.size())
+                    {
+                        link_name = std::string(names[link_index]);
+                    }
+                }
+            }
+
+            if (link_name.empty())
+            {
+                link_name = std::string("sphere_") + std::to_string(sphere_index);
+            }
+
+            return {link_index, link_name};
+        }
+
+        template <typename Robot>
+        inline auto make_link_body(std::size_t robot_index, std::size_t sphere_index) -> DebugBody
+        {
+            const auto [link_index, link_name] = link_info_from_sphere<Robot>(sphere_index);
+
+            DebugBody body;
+            body.robot_index = robot_index;
+            body.sphere_index = sphere_index;
+            body.link_index = link_index;
+            body.name = link_name;
+            return body;
+        }
+
+        inline auto make_attachment_body(std::size_t robot_index, std::size_t attachment_index) -> DebugBody
+        {
+            DebugBody body;
+            body.robot_index = robot_index;
+            body.sphere_index = attachment_index;
+            body.link_index = attachment_index;
+            body.is_attachment = true;
+            body.attachment_index = attachment_index;
+            body.name = std::string("attachment_") + std::to_string(attachment_index);
+            return body;
+        }
+
         template <typename SpheresT>
         inline auto apply_transform(SpheresT &spheres, const Eigen::Isometry3f &tf) noexcept -> void
         {
@@ -944,6 +1026,110 @@ namespace vamp::collision
             return has_collision;
         }
 
+        template <typename RobotStateT, std::size_t rake>
+        inline auto process_robot_state_debug(
+            const collision::Environment<FloatVector<rake>> &source_environment,
+            const RobotStateT &state,
+            std::size_t robot_index,
+            const MultiRobotCollisionFilter::RobotFilter *filter,
+            typename RobotStateT::RobotType::template Spheres<rake> &spheres,
+            std::vector<collision::Sphere<FloatVector<rake>>> &attachment_spheres,
+            DebugFkccMultiAllResult &result) noexcept -> void
+        {
+            using Robot = typename RobotStateT::RobotType;
+
+            auto &entry = detail::environment_entry_for_transform<rake>(
+                source_environment, state.base_transform);
+            auto &robot_environment = entry.environment;
+
+            auto saved_attachments = robot_environment.attachments;
+
+            if (state.attachment)
+            {
+                robot_environment.attachments.emplace(*state.attachment);
+            }
+            else
+            {
+                robot_environment.attachments.reset();
+            }
+
+            const auto debug = Robot::template fkcc_debug<rake>(robot_environment, state.configuration);
+
+            if (state.attachment)
+            {
+                Robot::template fkcc_attach<rake>(robot_environment, state.configuration);
+            }
+            else
+            {
+                Robot::template fkcc<rake>(robot_environment, state.configuration);
+            }
+
+            for (std::size_t sphere_index = 0; sphere_index < debug.first.size(); ++sphere_index)
+            {
+                const auto &objects = debug.first[sphere_index];
+                if (objects.empty())
+                {
+                    continue;
+                }
+
+                for (const auto &object : objects)
+                {
+                    const bool allowed = (filter != nullptr) && filter->allows_sphere(sphere_index, object);
+                    if (not allowed)
+                    {
+                        result.link_object.push_back(
+                            {make_link_body<Robot>(robot_index, sphere_index), object});
+                    }
+                }
+            }
+
+            for (const auto &self_collision : debug.second)
+            {
+                result.link_link.push_back(
+                    {make_link_body<Robot>(robot_index, self_collision.first),
+                     make_link_body<Robot>(robot_index, self_collision.second)});
+            }
+
+            Robot::sphere_fk(state.configuration, spheres);
+            apply_transform(spheres, state.base_transform);
+
+            attachment_spheres.clear();
+            if (robot_environment.attachments)
+            {
+                attachment_spheres = robot_environment.attachments->posed_spheres;
+
+                for (std::size_t attachment_index = 0; attachment_index < attachment_spheres.size(); ++attachment_index)
+                {
+                    const auto &sphere = attachment_spheres[attachment_index];
+                    const auto collisions = sphere_environment_get_collisions(
+                        robot_environment,
+                        sphere.x,
+                        sphere.y,
+                        sphere.z,
+                        sphere.r);
+
+                    if (collisions.empty())
+                    {
+                        continue;
+                    }
+
+                    for (const auto &object : collisions)
+                    {
+                        const bool allowed = (filter != nullptr) && filter->allows_attachment(object);
+                        if (not allowed)
+                        {
+                            result.link_object.push_back(
+                                {make_attachment_body(robot_index, attachment_index), object});
+                        }
+                    }
+                }
+
+                apply_transform<rake>(attachment_spheres, state.base_transform);
+            }
+
+            robot_environment.attachments = std::move(saved_attachments);
+        }
+
         template <std::size_t rake, typename... States>
         inline auto fkcc_multi_all_attach_impl(
             const collision::Environment<FloatVector<rake>> &environment,
@@ -1070,6 +1256,157 @@ namespace vamp::collision
         {
             return fkcc_multi_self_attach_impl_dispatch<rake, true>(states...);
         }
+
+        template <
+            typename StateTuple,
+            std::size_t rake,
+            std::size_t I,
+            std::size_t J,
+            typename SphereTuple,
+            typename AttachmentTuple>
+        inline auto collect_cross_robot_collisions(
+            const SphereTuple &spheres,
+            const AttachmentTuple &attachments,
+            DebugFkccMultiAllResult &result) noexcept -> void
+        {
+            if constexpr (I >= std::tuple_size_v<SphereTuple>)
+            {
+                return;
+            }
+            else if constexpr (J >= std::tuple_size_v<SphereTuple>)
+            {
+                collect_cross_robot_collisions<StateTuple, rake, I + 1, I + 2>(
+                    spheres, attachments, result);
+            }
+            else
+            {
+                using StateA = std::tuple_element_t<I, StateTuple>;
+                using StateB = std::tuple_element_t<J, StateTuple>;
+                using RobotA = typename StateA::RobotType;
+                using RobotB = typename StateB::RobotType;
+
+                const auto &spheres_a = std::get<I>(spheres);
+                const auto &spheres_b = std::get<J>(spheres);
+
+                constexpr std::size_t count_a = std::remove_reference_t<decltype(spheres_a.x)>::num_rows;
+                constexpr std::size_t count_b = std::remove_reference_t<decltype(spheres_b.x)>::num_rows;
+
+                for (std::size_t a = 0; a < count_a; ++a)
+                {
+                    const auto ax = spheres_a.x[a];
+                    const auto ay = spheres_a.y[a];
+                    const auto az = spheres_a.z[a];
+                    const auto ar = spheres_a.r[a];
+
+                    for (std::size_t b = 0; b < count_b; ++b)
+                    {
+                        if (not collision::sphere_sphere_sql2(
+                                    ax,
+                                    ay,
+                                    az,
+                                    ar,
+                                    spheres_b.x[b],
+                                    spheres_b.y[b],
+                                    spheres_b.z[b],
+                                    spheres_b.r[b])
+                                    .test_zero())
+                        {
+                            result.link_link.push_back(
+                                {make_link_body<RobotA>(I, a), make_link_body<RobotB>(J, b)});
+                        }
+                    }
+                }
+
+                const auto &attachments_a = std::get<I>(attachments);
+                const auto &attachments_b = std::get<J>(attachments);
+
+                for (std::size_t attachment_index = 0; attachment_index < attachments_a.size(); ++attachment_index)
+                {
+                    const auto &attachment = attachments_a[attachment_index];
+                    for (std::size_t b = 0; b < count_b; ++b)
+                    {
+                        if (not collision::sphere_sphere_sql2(
+                                    attachment,
+                                    spheres_b.x[b],
+                                    spheres_b.y[b],
+                                    spheres_b.z[b],
+                                    spheres_b.r[b])
+                                    .test_zero())
+                        {
+                            result.link_link.push_back(
+                                {make_attachment_body(I, attachment_index), make_link_body<RobotB>(J, b)});
+                        }
+                    }
+
+                    for (std::size_t other_attachment_index = 0;
+                         other_attachment_index < attachments_b.size();
+                         ++other_attachment_index)
+                    {
+                        if (not collision::sphere_sphere_sql2(
+                                    attachment, attachments_b[other_attachment_index])
+                                    .test_zero())
+                        {
+                            result.link_link.push_back(
+                                {make_attachment_body(I, attachment_index),
+                                 make_attachment_body(J, other_attachment_index)});
+                        }
+                    }
+                }
+
+                for (std::size_t attachment_index = 0; attachment_index < attachments_b.size(); ++attachment_index)
+                {
+                    const auto &attachment = attachments_b[attachment_index];
+                    for (std::size_t a = 0; a < count_a; ++a)
+                    {
+                        if (not collision::sphere_sphere_sql2(
+                                    attachment,
+                                    spheres_a.x[a],
+                                    spheres_a.y[a],
+                                    spheres_a.z[a],
+                                    spheres_a.r[a])
+                                    .test_zero())
+                        {
+                            result.link_link.push_back(
+                                {make_attachment_body(J, attachment_index), make_link_body<RobotA>(I, a)});
+                        }
+                    }
+                }
+
+                collect_cross_robot_collisions<StateTuple, rake, I, J + 1>(spheres, attachments, result);
+            }
+        }
+
+        template <std::size_t rake, typename... States>
+        inline auto debug_fkcc_multi_all_impl(
+            const collision::Environment<FloatVector<rake>> &environment,
+            const MultiRobotCollisionFilter *filter,
+            const States &... states) noexcept -> DebugFkccMultiAllResult
+        {
+            static_assert(sizeof...(States) > 0, "debug_fkcc_multi_all requires at least one robot state");
+
+            DebugFkccMultiAllResult result;
+
+            auto spheres = std::tuple<typename States::RobotType::template Spheres<rake>...>{};
+            auto attachments = std::tuple<
+                std::conditional_t<true, std::vector<collision::Sphere<FloatVector<rake>>>, States>...>{};
+
+            [&]<std::size_t... I>(std::index_sequence<I...>)
+            {
+                (..., detail::process_robot_state_debug<std::tuple_element_t<I, std::tuple<States...>>, rake>(
+                          environment,
+                          std::get<I>(std::forward_as_tuple(states...)),
+                          I,
+                          (filter != nullptr) ? filter->robot(I) : nullptr,
+                          std::get<I>(spheres),
+                          std::get<I>(attachments),
+                          result));
+            }(std::index_sequence_for<States...>{});
+
+            using StateTuple = std::tuple<States...>;
+            collect_cross_robot_collisions<StateTuple, rake, 0, 1>(spheres, attachments, result);
+
+            return result;
+        }
     }  // namespace detail
 
     template <std::size_t rake, typename... States>
@@ -1128,5 +1465,22 @@ namespace vamp::collision
     inline auto fkcc_multi_cross(const States &... states) noexcept -> bool
     {
         return detail::fkcc_multi_cross_attach_impl<rake>(states...);
+    }
+
+    template <std::size_t rake, typename... States>
+    inline auto debug_fkcc_multi_all(
+        const collision::Environment<FloatVector<rake>> &environment,
+        const States &... states) noexcept -> DebugFkccMultiAllResult
+    {
+        return detail::debug_fkcc_multi_all_impl<rake>(environment, nullptr, states...);
+    }
+
+    template <std::size_t rake, typename... States>
+    inline auto debug_fkcc_multi_all(
+        const collision::Environment<FloatVector<rake>> &environment,
+        const MultiRobotCollisionFilter &filter,
+        const States &... states) noexcept -> DebugFkccMultiAllResult
+    {
+        return detail::debug_fkcc_multi_all_impl<rake>(environment, &filter, states...);
     }
 }  // namespace vamp::collision
