@@ -1,7 +1,9 @@
 #include <array>
 #include <iostream>
+#include <optional>
 #include <random>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <Eigen/Geometry>
@@ -57,6 +59,71 @@ inline auto print_body(const vc::DebugBody &body, const std::vector<std::string>
     std::cout << " sphere_idx=" << body.sphere_index;
 }
 
+inline auto print_pose(const vc::DebugCollisionPose &pose, std::string_view label, std::string_view indent = "    ")
+    -> void
+{
+    auto lane_count = std::size_t{0};
+    auto update_lane_count = [&](const std::vector<float> &values) { lane_count = std::max(lane_count, values.size()); };
+    update_lane_count(pose.x);
+    update_lane_count(pose.y);
+    update_lane_count(pose.z);
+    update_lane_count(pose.l);
+    update_lane_count(pose.w);
+    update_lane_count(pose.h);
+    update_lane_count(pose.qx);
+    update_lane_count(pose.qy);
+    update_lane_count(pose.qz);
+    update_lane_count(pose.qw);
+
+    if (lane_count == 0)
+    {
+        lane_count = 1;
+    }
+
+    auto value_at = [](const std::vector<float> &values, std::size_t lane) -> std::optional<float>
+    {
+        if (lane < values.size())
+        {
+            return values[lane];
+        }
+        return std::nullopt;
+    };
+
+    for (std::size_t lane = 0; lane < lane_count; ++lane)
+    {
+        std::cout << indent << label;
+        if (lane_count > 1)
+        {
+            std::cout << " lane " << lane;
+        }
+        std::cout << " (" << pose.shape << ")";
+
+        if (auto x = value_at(pose.x, lane))
+        {
+            const auto y = value_at(pose.y, lane).value_or(0.0F);
+            const auto z = value_at(pose.z, lane).value_or(0.0F);
+            std::cout << " pos=(" << *x << ", " << y << ", " << z << ")";
+        }
+
+        if (auto l = value_at(pose.l, lane))
+        {
+            const auto w = value_at(pose.w, lane).value_or(0.0F);
+            const auto h = value_at(pose.h, lane).value_or(0.0F);
+            std::cout << " size(l,w,h)=(" << *l << ", " << w << ", " << h << ")";
+        }
+
+        if (auto qx = value_at(pose.qx, lane))
+        {
+            const auto qy = value_at(pose.qy, lane).value_or(0.0F);
+            const auto qz = value_at(pose.qz, lane).value_or(0.0F);
+            const auto qw = value_at(pose.qw, lane).value_or(1.0F);
+            std::cout << " q=(" << *qx << ", " << qy << ", " << qz << ", " << qw << ")";
+        }
+
+        std::cout << "\n";
+    }
+}
+
 inline auto print_result(const vc::DebugFkccMultiAllResult &result, const std::vector<std::string> &labels) -> void
 {
     if (result.link_link.empty() && result.link_object.empty())
@@ -72,6 +139,8 @@ inline auto print_result(const vc::DebugFkccMultiAllResult &result, const std::v
         std::cout << " <-> ";
         print_body(collision.second, labels);
         std::cout << "\n";
+        print_pose(collision.first_pose, "first");
+        print_pose(collision.second_pose, "second");
     }
 
     for (const auto &collision : result.link_object)
@@ -79,6 +148,11 @@ inline auto print_result(const vc::DebugFkccMultiAllResult &result, const std::v
         std::cout << "  link-object: ";
         print_body(collision.link, labels);
         std::cout << " vs object '" << collision.object << "'\n";
+        print_pose(collision.link_pose, "link");
+        if (collision.object_pose)
+        {
+            print_pose(*collision.object_pose, "object");
+        }
     }
 }
 

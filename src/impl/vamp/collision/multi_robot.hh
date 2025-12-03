@@ -4,6 +4,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -176,16 +178,39 @@ namespace vamp::collision
         std::string name;
     };
 
+    struct DebugCollisionPose
+    {
+        // shape: tag describing the primitive source, values: per-lane center (x/y/z), dimensions
+        // (l/w/h) and orientation quaternion (qx/qy/qz/qw). Capsules encode l as axial length
+        // including caps, cylinders use the raw axial length, w/h as 2*radius; spheres set
+        // l=w=h=2*radius and identity orientation.
+        std::string shape;
+        std::vector<float> x;
+        std::vector<float> y;
+        std::vector<float> z;
+        std::vector<float> l;
+        std::vector<float> w;
+        std::vector<float> h;
+        std::vector<float> qx;
+        std::vector<float> qy;
+        std::vector<float> qz;
+        std::vector<float> qw;
+    };
+
     struct DebugLinkLinkCollision
     {
         DebugBody first;
         DebugBody second;
+        DebugCollisionPose first_pose;
+        DebugCollisionPose second_pose;
     };
 
     struct DebugLinkObjectCollision
     {
         DebugBody link;
+        DebugCollisionPose link_pose;
         std::string object;
+        std::optional<DebugCollisionPose> object_pose;
     };
 
     struct DebugFkccMultiAllResult
@@ -247,6 +272,316 @@ namespace vamp::collision
             body.attachment_index = attachment_index;
             body.name = std::string("attachment_") + std::to_string(attachment_index);
             return body;
+        }
+
+        template <typename ValueT>
+        inline auto extract_scalars(const ValueT &value) -> std::vector<float>
+        {
+            if constexpr (vamp::is_vector<ValueT>::value)
+            {
+                const auto raw = value.to_array();
+
+                std::vector<float> lanes;
+                lanes.reserve(ValueT::num_scalars);
+                for (std::size_t i = 0; i < ValueT::num_scalars; ++i)
+                {
+                    lanes.push_back(static_cast<float>(raw[i]));
+                }
+
+                return lanes;
+            }
+            else
+            {
+                return {static_cast<float>(value)};
+            }
+        }
+
+        inline auto set_identity_quaternion(DebugCollisionPose &pose, std::size_t lane_count) -> void
+        {
+            pose.qx.assign(lane_count, 0.0F);
+            pose.qy.assign(lane_count, 0.0F);
+            pose.qz.assign(lane_count, 0.0F);
+            pose.qw.assign(lane_count, 1.0F);
+        }
+
+        template <typename XT, typename YT, typename ZT>
+        inline auto make_pose_with_dims(
+            std::string shape,
+            const XT &x,
+            const YT &y,
+            const ZT &z,
+            const std::vector<float> &l,
+            const std::vector<float> &w,
+            const std::vector<float> &h) -> DebugCollisionPose
+        {
+            DebugCollisionPose pose;
+            pose.shape = std::move(shape);
+            pose.x = extract_scalars(x);
+            pose.y = extract_scalars(y);
+            pose.z = extract_scalars(z);
+            pose.l = l;
+            pose.w = w;
+            pose.h = h;
+
+            const auto lane_count =
+                std::max<std::size_t>({pose.x.size(), pose.y.size(), pose.z.size(), pose.l.size(), pose.w.size(), pose.h.size()});
+            set_identity_quaternion(pose, lane_count == 0 ? 1 : lane_count);
+            return pose;
+        }
+
+        template <typename SpheresT>
+        inline auto make_pose_from_sphere_index(const SpheresT &spheres, std::size_t sphere_index)
+            -> DebugCollisionPose
+        {
+            const auto r_lanes = extract_scalars(spheres.r[sphere_index]);
+            std::vector<float> dims_l;
+            std::vector<float> dims_w;
+            std::vector<float> dims_h;
+            dims_l.reserve(r_lanes.size());
+            dims_w.reserve(r_lanes.size());
+            dims_h.reserve(r_lanes.size());
+            for (const auto r_value : r_lanes)
+            {
+                const float diameter = 2.0F * r_value;
+                dims_l.push_back(diameter);
+                dims_w.push_back(diameter);
+                dims_h.push_back(diameter);
+            }
+
+            return make_pose_with_dims(
+                std::string("sphere"),
+                spheres.x[sphere_index],
+                spheres.y[sphere_index],
+                spheres.z[sphere_index],
+                dims_l,
+                dims_w,
+                dims_h);
+        }
+
+        template <typename SphereT>
+        inline auto make_pose_from_sphere(const SphereT &sphere, std::string shape = "sphere") -> DebugCollisionPose
+        {
+            const auto r_lanes = extract_scalars(sphere.r);
+            std::vector<float> dims_l;
+            std::vector<float> dims_w;
+            std::vector<float> dims_h;
+            dims_l.reserve(r_lanes.size());
+            dims_w.reserve(r_lanes.size());
+            dims_h.reserve(r_lanes.size());
+
+            for (const auto r_value : r_lanes)
+            {
+                const float diameter = 2.0F * r_value;
+                dims_l.push_back(diameter);
+                dims_w.push_back(diameter);
+                dims_h.push_back(diameter);
+            }
+
+            return make_pose_with_dims(shape, sphere.x, sphere.y, sphere.z, dims_l, dims_w, dims_h);
+        }
+
+        inline auto unit_vector_or(const Eigen::Vector3f &v, const Eigen::Vector3f &fallback) -> Eigen::Vector3f
+        {
+            const float norm = v.norm();
+            if (norm < 1e-6F)
+            {
+                return fallback;
+            }
+            return v / norm;
+        }
+
+        inline auto quaternion_from_direction(const Eigen::Vector3f &direction) -> Eigen::Quaternionf
+        {
+            const auto z = unit_vector_or(direction, Eigen::Vector3f::UnitZ());
+            Eigen::Vector3f helper = std::abs(z.z()) < 0.9F ? Eigen::Vector3f::UnitZ() : Eigen::Vector3f::UnitX();
+            auto x = z.cross(helper);
+            if (x.squaredNorm() < 1e-8F)
+            {
+                helper = Eigen::Vector3f::UnitY();
+                x = z.cross(helper);
+            }
+            x.normalize();
+            const auto y = z.cross(x).normalized();
+
+            Eigen::Matrix3f basis;
+            basis.col(0) = x;
+            basis.col(1) = y;
+            basis.col(2) = z;
+
+            Eigen::Quaternionf q(basis);
+            q.normalize();
+            return q;
+        }
+
+        template <typename CapsuleT>
+        inline auto make_pose_from_capsule(const CapsuleT &capsule, std::string shape, bool include_caps)
+            -> DebugCollisionPose
+        {
+            const auto start_x = extract_scalars(capsule.x1);
+            const auto start_y = extract_scalars(capsule.y1);
+            const auto start_z = extract_scalars(capsule.z1);
+            const auto delta_x = extract_scalars(capsule.xv);
+            const auto delta_y = extract_scalars(capsule.yv);
+            const auto delta_z = extract_scalars(capsule.zv);
+            const auto r_lanes = extract_scalars(capsule.r);
+
+            const std::size_t lane_count = std::max<std::size_t>(
+                {start_x.size(), start_y.size(), start_z.size(), delta_x.size(), delta_y.size(), delta_z.size(), r_lanes.size()});
+
+            DebugCollisionPose pose;
+            pose.shape = std::move(shape);
+            pose.x.reserve(lane_count);
+            pose.y.reserve(lane_count);
+            pose.z.reserve(lane_count);
+            pose.l.reserve(lane_count);
+            pose.w.reserve(lane_count);
+            pose.h.reserve(lane_count);
+            pose.qx.reserve(lane_count);
+            pose.qy.reserve(lane_count);
+            pose.qz.reserve(lane_count);
+            pose.qw.reserve(lane_count);
+
+            for (std::size_t lane = 0; lane < lane_count; ++lane)
+            {
+                const float sx = (lane < start_x.size()) ? start_x[lane] : start_x.back();
+                const float sy = (lane < start_y.size()) ? start_y[lane] : start_y.back();
+                const float sz = (lane < start_z.size()) ? start_z[lane] : start_z.back();
+                const float dx = (lane < delta_x.size()) ? delta_x[lane] : delta_x.back();
+                const float dy = (lane < delta_y.size()) ? delta_y[lane] : delta_y.back();
+                const float dz = (lane < delta_z.size()) ? delta_z[lane] : delta_z.back();
+                const float r = (lane < r_lanes.size()) ? r_lanes[lane] : r_lanes.back();
+
+                const Eigen::Vector3f delta(dx, dy, dz);
+                const float length = delta.norm();
+                const Eigen::Vector3f center = Eigen::Vector3f(sx, sy, sz) + 0.5F * delta;
+                const auto q = quaternion_from_direction(delta);
+
+                pose.x.push_back(center.x());
+                pose.y.push_back(center.y());
+                pose.z.push_back(center.z());
+                // Encode capsule/cylinder as oriented box-like dimensions: length along its axis, diameter as width/height.
+                pose.l.push_back(length + (include_caps ? 2.0F * r : 0.0F));
+                pose.w.push_back(2.0F * r);
+                pose.h.push_back(2.0F * r);
+                pose.qx.push_back(q.x());
+                pose.qy.push_back(q.y());
+                pose.qz.push_back(q.z());
+                pose.qw.push_back(q.w());
+            }
+
+            return pose;
+        }
+
+        inline auto quaternion_from_axes(
+            const Eigen::Vector3f &axis1,
+            const Eigen::Vector3f &axis2,
+            const Eigen::Vector3f &axis3) -> Eigen::Quaternionf
+        {
+            auto x = unit_vector_or(axis1, Eigen::Vector3f::UnitX());
+            auto y = unit_vector_or(axis2, Eigen::Vector3f::UnitY());
+            auto z = x.cross(y);
+            if (z.squaredNorm() < 1e-8F)
+            {
+                y = x.unitOrthogonal();
+                z = x.cross(y);
+            }
+            z.normalize();
+            y = z.cross(x).normalized();
+
+            Eigen::Matrix3f basis;
+            basis.col(0) = x;
+            basis.col(1) = y;
+            basis.col(2) = z;
+
+            Eigen::Quaternionf q(basis);
+            q.normalize();
+            return q;
+        }
+
+        template <typename CuboidT>
+        inline auto make_pose_from_cuboid(const CuboidT &cuboid, std::string shape) -> DebugCollisionPose
+        {
+            const auto axis_1_x = extract_scalars(cuboid.axis_1_x);
+            const auto axis_1_y = extract_scalars(cuboid.axis_1_y);
+            const auto axis_1_z = extract_scalars(cuboid.axis_1_z);
+            const auto axis_2_x = extract_scalars(cuboid.axis_2_x);
+            const auto axis_2_y = extract_scalars(cuboid.axis_2_y);
+            const auto axis_2_z = extract_scalars(cuboid.axis_2_z);
+            const auto axis_3_x = extract_scalars(cuboid.axis_3_x);
+            const auto axis_3_y = extract_scalars(cuboid.axis_3_y);
+            const auto axis_3_z = extract_scalars(cuboid.axis_3_z);
+            const auto axis_1_r = extract_scalars(cuboid.axis_1_r);
+            const auto axis_2_r = extract_scalars(cuboid.axis_2_r);
+            const auto axis_3_r = extract_scalars(cuboid.axis_3_r);
+
+            const auto cx = extract_scalars(cuboid.x);
+            const auto cy = extract_scalars(cuboid.y);
+            const auto cz = extract_scalars(cuboid.z);
+
+            const std::size_t lane_count = std::max<std::size_t>(
+                {cx.size(),
+                 cy.size(),
+                 cz.size(),
+                 axis_1_x.size(),
+                 axis_1_y.size(),
+                 axis_1_z.size(),
+                 axis_2_x.size(),
+                 axis_2_y.size(),
+                 axis_2_z.size(),
+                 axis_3_x.size(),
+                 axis_3_y.size(),
+                 axis_3_z.size(),
+                 axis_1_r.size(),
+                 axis_2_r.size(),
+                 axis_3_r.size()});
+
+            DebugCollisionPose pose;
+            pose.shape = std::move(shape);
+            pose.x.reserve(lane_count);
+            pose.y.reserve(lane_count);
+            pose.z.reserve(lane_count);
+            pose.l.reserve(lane_count);
+            pose.w.reserve(lane_count);
+            pose.h.reserve(lane_count);
+            pose.qx.reserve(lane_count);
+            pose.qy.reserve(lane_count);
+            pose.qz.reserve(lane_count);
+            pose.qw.reserve(lane_count);
+
+            for (std::size_t lane = 0; lane < lane_count; ++lane)
+            {
+                const auto a1 = Eigen::Vector3f(
+                    (lane < axis_1_x.size()) ? axis_1_x[lane] : axis_1_x.back(),
+                    (lane < axis_1_y.size()) ? axis_1_y[lane] : axis_1_y.back(),
+                    (lane < axis_1_z.size()) ? axis_1_z[lane] : axis_1_z.back());
+                const auto a2 = Eigen::Vector3f(
+                    (lane < axis_2_x.size()) ? axis_2_x[lane] : axis_2_x.back(),
+                    (lane < axis_2_y.size()) ? axis_2_y[lane] : axis_2_y.back(),
+                    (lane < axis_2_z.size()) ? axis_2_z[lane] : axis_2_z.back());
+                const auto a3 = Eigen::Vector3f(
+                    (lane < axis_3_x.size()) ? axis_3_x[lane] : axis_3_x.back(),
+                    (lane < axis_3_y.size()) ? axis_3_y[lane] : axis_3_y.back(),
+                    (lane < axis_3_z.size()) ? axis_3_z[lane] : axis_3_z.back());
+
+                const float l = 2.0F * ((lane < axis_1_r.size()) ? axis_1_r[lane] : axis_1_r.back());
+                const float w = 2.0F * ((lane < axis_2_r.size()) ? axis_2_r[lane] : axis_2_r.back());
+                const float h = 2.0F * ((lane < axis_3_r.size()) ? axis_3_r[lane] : axis_3_r.back());
+
+                const auto q = quaternion_from_axes(a1, a2, a3);
+
+                pose.x.push_back((lane < cx.size()) ? cx[lane] : cx.back());
+                pose.y.push_back((lane < cy.size()) ? cy[lane] : cy.back());
+                pose.z.push_back((lane < cz.size()) ? cz[lane] : cz.back());
+                pose.l.push_back(l);
+                pose.w.push_back(w);
+                pose.h.push_back(h);
+                pose.qx.push_back(q.x());
+                pose.qy.push_back(q.y());
+                pose.qz.push_back(q.z());
+                pose.qw.push_back(q.w());
+            }
+
+            return pose;
         }
 
         template <typename SpheresT>
@@ -503,7 +838,18 @@ namespace vamp::collision
             };
 
             inline static thread_local std::vector<Entry> storage{};
+
+            inline static auto clear() noexcept -> void
+            {
+                storage.clear();
+            }
         };
+
+        template <std::size_t rake>
+        inline auto clear_environment_transform_cache() noexcept -> void
+        {
+            EnvironmentTransformCache<rake>::clear();
+        }
 
         template <std::size_t rake>
         inline auto environment_entry_for_transform(
@@ -936,6 +1282,63 @@ namespace vamp::collision
             return has_attachment;
         }
 
+        template <std::size_t rake>
+        inline auto find_environment_object_pose(
+            const collision::Environment<FloatVector<rake>> &environment,
+            std::string_view name) -> std::optional<DebugCollisionPose>
+        {
+            for (const auto &sphere : environment.spheres)
+            {
+                if (sphere.name == name)
+                {
+                    return make_pose_from_sphere(sphere);
+                }
+            }
+
+            for (const auto &capsule : environment.capsules)
+            {
+                if (capsule.name == name)
+                {
+                    return make_pose_from_capsule(capsule, "capsule", true);
+                }
+            }
+
+            for (const auto &capsule : environment.z_aligned_capsules)
+            {
+                if (capsule.name == name)
+                {
+                    return make_pose_from_capsule(capsule, "z_aligned_capsule", true);
+                }
+            }
+
+            for (const auto &cylinder : environment.cylinders)
+            {
+                if (cylinder.name == name)
+                {
+                    return make_pose_from_capsule(cylinder, "cylinder", false);
+                }
+            }
+
+            for (const auto &cuboid : environment.cuboids)
+            {
+                if (cuboid.name == name)
+                {
+                    return make_pose_from_cuboid(cuboid, "cuboid");
+                }
+            }
+
+            for (const auto &cuboid : environment.z_aligned_cuboids)
+            {
+                if (cuboid.name == name)
+                {
+                    return make_pose_from_cuboid(cuboid, "z_aligned_cuboid");
+                }
+            }
+
+            // Heightfields and CAPT pointclouds currently have no pose reporting in debug output.
+            return std::nullopt;
+        }
+
         inline auto set_contains(const std::unordered_set<std::string> &set, std::string_view value) -> bool
         {
             if (set.empty())
@@ -1064,6 +1467,9 @@ namespace vamp::collision
                 Robot::template fkcc<rake>(robot_environment, state.configuration);
             }
 
+            Robot::sphere_fk(state.configuration, spheres);
+            apply_transform(spheres, state.base_transform);
+
             for (std::size_t sphere_index = 0; sphere_index < debug.first.size(); ++sphere_index)
             {
                 const auto &objects = debug.first[sphere_index];
@@ -1072,13 +1478,18 @@ namespace vamp::collision
                     continue;
                 }
 
+                const auto link_pose = make_pose_from_sphere_index(spheres, sphere_index);
+
                 for (const auto &object : objects)
                 {
                     const bool allowed = (filter != nullptr) && filter->allows_sphere(sphere_index, object);
                     if (not allowed)
                     {
                         result.link_object.push_back(
-                            {make_link_body<Robot>(robot_index, sphere_index), object});
+                            {make_link_body<Robot>(robot_index, sphere_index),
+                             link_pose,
+                             object,
+                             find_environment_object_pose<rake>(source_environment, object)});
                     }
                 }
             }
@@ -1087,15 +1498,16 @@ namespace vamp::collision
             {
                 result.link_link.push_back(
                     {make_link_body<Robot>(robot_index, self_collision.first),
-                     make_link_body<Robot>(robot_index, self_collision.second)});
+                     make_link_body<Robot>(robot_index, self_collision.second),
+                     make_pose_from_sphere_index(spheres, self_collision.first),
+                     make_pose_from_sphere_index(spheres, self_collision.second)});
             }
-
-            Robot::sphere_fk(state.configuration, spheres);
-            apply_transform(spheres, state.base_transform);
 
             attachment_spheres.clear();
             if (robot_environment.attachments)
             {
+                std::vector<std::pair<std::size_t, std::string>> attachment_hits;
+
                 attachment_spheres = robot_environment.attachments->posed_spheres;
 
                 for (std::size_t attachment_index = 0; attachment_index < attachment_spheres.size(); ++attachment_index)
@@ -1118,13 +1530,22 @@ namespace vamp::collision
                         const bool allowed = (filter != nullptr) && filter->allows_attachment(object);
                         if (not allowed)
                         {
-                            result.link_object.push_back(
-                                {make_attachment_body(robot_index, attachment_index), object});
+                            attachment_hits.emplace_back(attachment_index, object);
                         }
                     }
                 }
 
                 apply_transform<rake>(attachment_spheres, state.base_transform);
+
+                for (const auto &hit : attachment_hits)
+                {
+                    const auto attachment_index = hit.first;
+                    result.link_object.push_back(
+                        {make_attachment_body(robot_index, attachment_index),
+                         make_pose_from_sphere(attachment_spheres[attachment_index]),
+                         hit.second,
+                         find_environment_object_pose<rake>(source_environment, hit.second)});
+                }
             }
 
             robot_environment.attachments = std::move(saved_attachments);
@@ -1312,7 +1733,10 @@ namespace vamp::collision
                                     .test_zero())
                         {
                             result.link_link.push_back(
-                                {make_link_body<RobotA>(I, a), make_link_body<RobotB>(J, b)});
+                                {make_link_body<RobotA>(I, a),
+                                 make_link_body<RobotB>(J, b),
+                                 make_pose_from_sphere_index(spheres_a, a),
+                                 make_pose_from_sphere_index(spheres_b, b)});
                         }
                     }
                 }
@@ -1334,7 +1758,10 @@ namespace vamp::collision
                                     .test_zero())
                         {
                             result.link_link.push_back(
-                                {make_attachment_body(I, attachment_index), make_link_body<RobotB>(J, b)});
+                                {make_attachment_body(I, attachment_index),
+                                 make_link_body<RobotB>(J, b),
+                                 make_pose_from_sphere(attachment),
+                                 make_pose_from_sphere_index(spheres_b, b)});
                         }
                     }
 
@@ -1348,7 +1775,9 @@ namespace vamp::collision
                         {
                             result.link_link.push_back(
                                 {make_attachment_body(I, attachment_index),
-                                 make_attachment_body(J, other_attachment_index)});
+                                 make_attachment_body(J, other_attachment_index),
+                                 make_pose_from_sphere(attachment),
+                                 make_pose_from_sphere(attachments_b[other_attachment_index])});
                         }
                     }
                 }
@@ -1367,7 +1796,10 @@ namespace vamp::collision
                                     .test_zero())
                         {
                             result.link_link.push_back(
-                                {make_attachment_body(J, attachment_index), make_link_body<RobotA>(I, a)});
+                                {make_attachment_body(J, attachment_index),
+                                 make_link_body<RobotA>(I, a),
+                                 make_pose_from_sphere(attachment),
+                                 make_pose_from_sphere_index(spheres_a, a)});
                         }
                     }
                 }
