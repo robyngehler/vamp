@@ -20,6 +20,7 @@
 #include <vamp/collision/environment.hh>
 #include <vamp/collision/validity.hh>
 #include <vamp/collision/sphere_sphere.hh>
+#include <vamp/collision/sphere_heightfield.hh>
 #include <vamp/robots/link_mapping.hh>
 
 namespace vamp::collision
@@ -221,6 +222,131 @@ namespace vamp::collision
 
     namespace detail
     {
+        template <std::size_t rake>
+        inline auto sphere_collides_with_pointclouds(
+            const collision::Environment<FloatVector<rake>> &environment,
+            const FloatVector<rake> &sx,
+            const FloatVector<rake> &sy,
+            const FloatVector<rake> &sz,
+            const FloatVector<rake> &sr) noexcept -> bool
+        {
+            if (environment.pointclouds.empty())
+            {
+                return false;
+            }
+
+            const std::array<FloatVector<rake>, 3> centers = {sx, sy, sz};
+            for (const auto &pc : environment.pointclouds)
+            {
+                if (pc.collides_simd(centers, sr))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        template <std::size_t rake>
+        inline auto sphere_collides_with_heightfields(
+            const collision::Environment<FloatVector<rake>> &environment,
+            const FloatVector<rake> &sx,
+            const FloatVector<rake> &sy,
+            const FloatVector<rake> &sz,
+            const FloatVector<rake> &sr) noexcept -> bool
+        {
+            if (environment.heightfields.empty())
+            {
+                return false;
+            }
+
+            for (const auto &hf : environment.heightfields)
+            {
+                if (not collision::sphere_heightfield(hf, sx, sy, sz, sr).test_zero())
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        template <std::size_t rake, typename SpheresT>
+        inline auto spheres_collide_with_pointclouds(
+            const collision::Environment<FloatVector<rake>> &environment,
+            const SpheresT &spheres) noexcept -> bool
+        {
+            constexpr std::size_t count = std::remove_reference_t<decltype(spheres.x)>::num_rows;
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                if (sphere_collides_with_pointclouds<rake>(
+                        environment,
+                        spheres.x[i],
+                        spheres.y[i],
+                        spheres.z[i],
+                        spheres.r[i]))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        template <std::size_t rake>
+        inline auto spheres_collide_with_pointclouds(
+            const collision::Environment<FloatVector<rake>> &environment,
+            const std::vector<collision::Sphere<FloatVector<rake>>> &spheres) noexcept -> bool
+        {
+            for (const auto &sphere : spheres)
+            {
+                if (sphere_collides_with_pointclouds<rake>(environment, sphere.x, sphere.y, sphere.z, sphere.r))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        template <std::size_t rake, typename SpheresT>
+        inline auto spheres_collide_with_heightfields(
+            const collision::Environment<FloatVector<rake>> &environment,
+            const SpheresT &spheres) noexcept -> bool
+        {
+            constexpr std::size_t count = std::remove_reference_t<decltype(spheres.x)>::num_rows;
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                if (sphere_collides_with_heightfields<rake>(
+                        environment,
+                        spheres.x[i],
+                        spheres.y[i],
+                        spheres.z[i],
+                        spheres.r[i]))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        template <std::size_t rake>
+        inline auto spheres_collide_with_heightfields(
+            const collision::Environment<FloatVector<rake>> &environment,
+            const std::vector<collision::Sphere<FloatVector<rake>>> &spheres) noexcept -> bool
+        {
+            for (const auto &sphere : spheres)
+            {
+                if (sphere_collides_with_heightfields<rake>(environment, sphere.x, sphere.y, sphere.z, sphere.r))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         template <typename Robot>
         inline auto link_info_from_sphere(std::size_t sphere_index) -> std::pair<std::size_t, std::string>
         {
@@ -867,15 +993,26 @@ namespace vamp::collision
                 }
             }
 
-            collision::Environment<FloatVector<rake>> transformed =
-                is_identity_transform(base_transform) ?
-                    collision::Environment<FloatVector<rake>>(source_environment) :
-                    [&]
-                    {
-                        collision::Environment<float> float_environment(source_environment);
-                        transform_environment_to_robot_frame(float_environment, base_transform);
-                        return collision::Environment<FloatVector<rake>>(float_environment);
-                    }();
+            // Pointclouds/heightfields are stored in the world frame and can be updated frequently.
+            // Multi-robot collision checking operates on robot spheres in world coordinates and tests
+            // against these non-rigid obstacles explicitly, so exclude them from the per-robot
+            // transformed environment used by Robot::fkcc* (which is evaluated in the robot frame).
+            collision::Environment<FloatVector<rake>> transformed = [&]
+            {
+                if (is_identity_transform(base_transform))
+                {
+                    collision::Environment<FloatVector<rake>> out(source_environment);
+                    out.heightfields.clear();
+                    out.pointclouds.clear();
+                    return out;
+                }
+
+                collision::Environment<float> float_environment(source_environment);
+                float_environment.heightfields.clear();
+                float_environment.pointclouds.clear();
+                transform_environment_to_robot_frame(float_environment, base_transform);
+                return collision::Environment<FloatVector<rake>>(float_environment);
+            }();
 
             storage.push_back({base_transform, std::move(transformed)});
             return storage.back();
@@ -946,6 +1083,18 @@ namespace vamp::collision
             {
                 attachment_spheres = robot_environment.attachments->posed_spheres;
                 apply_transform<rake>(attachment_spheres, state.base_transform);
+            }
+
+            // World-fixed non-rigid obstacles (heightfields + CAPT pointclouds) need to be checked
+            // in the world frame after the robot spheres have been transformed. This keeps collision
+            // checking consistent for non-identity robot base transforms.
+            if (detail::spheres_collide_with_heightfields<rake>(source_environment, spheres) ||
+                detail::spheres_collide_with_pointclouds<rake>(source_environment, spheres) ||
+                detail::spheres_collide_with_heightfields<rake>(source_environment, attachment_spheres) ||
+                detail::spheres_collide_with_pointclouds<rake>(source_environment, attachment_spheres))
+            {
+                robot_environment.attachments = std::move(saved_attachments);
+                return false;
             }
 
             robot_environment.attachments = std::move(saved_attachments);

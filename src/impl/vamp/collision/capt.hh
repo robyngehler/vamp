@@ -424,6 +424,24 @@ namespace vamp::collision
         // - `radii`: SIMD vector of the radii of each sphere.
         auto collides_simd(const std::array<FVectorT, 3> &centers, FVectorT radii) const noexcept -> bool
         {
+            // For a single-point tree (nlog2==0), the test buffer is empty and the SIMD traversal
+            // below is undefined. Fall back to a per-sphere check.
+            if (tests.empty())
+            {
+                const auto xs = centers[0].to_array();
+                const auto ys = centers[1].to_array();
+                const auto zs = centers[2].to_array();
+                const auto rs = radii.to_array();
+                for (uint8_t j = 0; j < FVectorT::num_scalars; j++)
+                {
+                    if (collides(Point{xs[j], ys[j], zs[j]}, rs[j]))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
             // Padd radii by radius of points.
             radii = radii + r_point;
             // Test against top AABB
