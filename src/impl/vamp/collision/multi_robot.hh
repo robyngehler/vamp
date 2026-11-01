@@ -1550,6 +1550,17 @@ namespace vamp::collision
 
             if (attachment_present && environment.attachments)
             {
+                // fkcc_attach returns at the first robot-environment contact, before it poses the
+                // attachment, so its spheres are not posed here. Pose them on an environment without
+                // obstacles: a failure there is a self or attachment-robot contact.
+                collision::Environment<FloatVector<rake>> posing;
+                posing.attachments.emplace(*environment.attachments);
+                if (not Robot::template fkcc_attach<rake>(posing, configuration))
+                {
+                    return false;
+                }
+                environment.attachments->posed_spheres = posing.attachments->posed_spheres;
+
                 for (const auto &sphere : environment.attachments->posed_spheres)
                 {
                     const auto collisions = sphere_environment_get_collisions(

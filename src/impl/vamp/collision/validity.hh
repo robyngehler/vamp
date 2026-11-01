@@ -4,6 +4,7 @@
 #include <vamp/collision/environment.hh>
 #include <vamp/collision/sphere_sphere.hh>
 #include <vamp/collision/sphere_capsule.hh>
+#include <vamp/collision/sphere_cylinder.hh>
 #include <vamp/collision/sphere_cuboid.hh>
 #include <vamp/collision/sphere_heightfield.hh>
 #include <vamp/collision/math.hh>
@@ -95,6 +96,20 @@ namespace vamp
             }
 
             if (not collision::sphere_z_aligned_capsule(ec, sx, sy, sz, sr).test_zero())
+            {
+                return true;
+            }
+        }
+
+        for (const auto &ec : e.cylinders)
+        {
+            const auto diff = ec.min_distance - max_extent;
+            if (diff.test_zero())
+            {
+                break;
+            }
+
+            if (not collision::sphere_cylinder(ec, sx, sy, sz, sr).test_zero())
             {
                 return true;
             }
@@ -203,6 +218,20 @@ namespace vamp
             }
 
             if (not collision::sphere_z_aligned_capsule(ec, sx, sy, sz, sr).test_zero())
+            {
+                objects.emplace_back(ec.name);
+            }
+        }
+
+        for (const auto &ec : e.cylinders)
+        {
+            const auto diff = ec.min_distance - max_extent;
+            if (diff.test_zero())
+            {
+                break;
+            }
+
+            if (not collision::sphere_cylinder(ec, sx, sy, sz, sr).test_zero())
             {
                 objects.emplace_back(ec.name);
             }
